@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
   pull_request:
 
@@ -16,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -35,6 +38,10 @@ jobs:
         run: python3 -m json.tool notebooks/kaggle-production-demo.ipynb >/dev/null
       - name: Publication surface audit
         run: python3 scripts/publication/audit_public_surface.py --root .
+      - name: Public history invariants
+        run: python3 scripts/publication/verify_history.py . --branch HEAD
+      - name: Release contract audit
+        run: python3 scripts/publication/audit_release_contract.py
       - name: No model weights in Git tree
         run: |
           if find . -type f \
