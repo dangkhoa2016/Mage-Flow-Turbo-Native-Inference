@@ -1,15 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "release_version": "1.0.0",
   "runtime": "stable-diffusion.cpp",
   "repository": "https://github.com/leejet/stable-diffusion.cpp",
   "commit": "6b3edaaf32cc19e5bb2d819c788bd557eddc8eba",
-  "qualified_backends": [],
   "diffusion_fa": true,
-  "source_provenance_note": "Mage-Flow-Turbo-Native-Inference v1.0.0 is a portable native inference and deployment stack. Python is orchestration; actual inference is executed by the pinned stable-diffusion.cpp sd-cli. The generic core contains no /kaggle/* hard dependency; Kaggle is an adapter/reference environment.",
-  "qualification_state": {
-    "linux_cpu": "pending",
-    "nvidia_cuda_cuda0": "pending",
-    "kaggle_cpu_adapter": "pending",
-    "kaggle_cuda_adapter": "pending"
-  }
+  "qualification_targets": [
+    "linux_x86_64_cpu",
+    "nvidia_cuda_cuda0",
+    "kaggle_cpu_adapter",
+    "kaggle_cuda0_adapter"
+  ],
+  "qualification_policy": "Exact-head CPU/CUDA qualification evidence is published with the v1.0.0 GitHub Release; source provenance records immutable inputs and targets, not mutable run state.",
+  "source_provenance_note": "Mage-Flow-Turbo-Native-Inference v1.0.0 is a portable native inference and deployment stack. Python is orchestration; actual inference is executed by the pinned stable-diffusion.cpp sd-cli. The generic core contains no /kaggle/* hard dependency; Kaggle is an adapter/reference environment."
 }
