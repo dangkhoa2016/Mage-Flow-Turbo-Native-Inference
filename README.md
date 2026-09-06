@@ -7,7 +7,7 @@
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](README.vi.md)
 
-A **portable native inference and deployment stack for Mage-Flow-Turbo**. This repository does not define a new model and does not train or fine-tune model weights. Python provides configuration, validation, CLI/REST orchestration, lifecycle control and evidence collection; model inference itself is executed by the native `stable-diffusion.cpp` `sd-cli` runtime.
+A **portable native inference and deployment stack for Mage-Flow-Turbo**. The project does not train or modify model weights. Python provides configuration, validation, CLI/REST orchestration, lifecycle control and evidence collection; model inference is executed by the native `stable-diffusion.cpp` `sd-cli` runtime.
 
 ```text
 manifest → SHA-256 verification → pinned sd-cli runtime
@@ -31,18 +31,29 @@ Frozen SHA-256 identities are enforced before real inference. The repository con
 
 ## v1.0.0 qualification scope
 
-v1.0.0 uses one exact Git source head and one frozen model/runtime contract. The required release qualification targets are:
-
 | Environment | Backend | Qualification role |
 |---|---|---|
 | Linux x86-64 | CPU | required release target |
 | Linux + NVIDIA GPU | CUDA `cuda0` | required release target |
-| Kaggle CPU notebook | CPU adapter | required integration target |
-| Kaggle T4/T4x2 notebook | CUDA adapter `cuda0` on physical GPU 0 | required integration target |
+| Kaggle Accelerator=None | auto-selected CPU | production/evidence integration target |
+| Kaggle NVIDIA T4/T4x2 | auto-selected CUDA `cuda0` on physical GPU 0 | production/evidence integration target |
 
-Multi-GPU inference, Vulkan, Metal, ROCm, SYCL, Windows and other backends are not v1.0.0 release qualification targets.
+The public Kaggle production notebook is **prebuilt-runtime only**: Accelerator=None selects CPU; T4/T4x2 selects CUDA0 slot 0; P100, TPU and other unsupported accelerators fail closed. There is no CPU fallback from an attached unsupported GPU and no source-build fallback.
 
-Final PASS/FAIL results and exact-head qualification evidence, including measured wall times, RAM/VRAM telemetry, runtime binary hashes, acceptance PNG hashes, executed notebooks, release provenance and SHA-256 checksums, are published with the GitHub Release rather than embedded as mutable source-tree state.
+## Canonical fresh CPU ↔ T4 benchmark
+
+Both authoritative evidence sessions used the same notebook source, source HEAD, model inputs, prompt, seed, steps, CFG, threads and matrix order.
+
+| Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 512×512 | 215.816 s | 7.590 s | **28.43×** | 238.072 s | 27.209 s | **8.75×** | 7,930 MiB |
+| 640×640 | 338.014 s | 8.698 s | **38.86×** | 363.299 s | 29.040 s | **12.51×** | 8,356 MiB |
+| 768×768 | 491.700 s | 9.710 s | **50.64×** | 513.961 s | 30.072 s | **17.09×** | 8,702 MiB |
+| 1024×1024 | 939.371 s | 12.420 s | **75.63×** | 962.737 s | 33.047 s | **29.13×** | 9,316 MiB |
+
+**Headline:** at 1024×1024, T4 native generation completed in **12.420 s** versus **939.371 s** on CPU — a **75.63×** same-resolution native-generation speedup.
+
+See [the complete benchmark evidence](docs/BENCHMARKS-v1.0.0.md) for notebook/runtime hashes, methodology and interpretation rules.
 
 ## Why native inference?
 
@@ -50,55 +61,30 @@ The diffusion step, text conditioning and VAE decoding are executed by `sd-cli`;
 
 ## Verify the model stack
 
-Model files are user-supplied or mounted. Loading uses a JSON model manifest and fails closed when a required component is missing, ambiguous or hash-mismatched.
-
 ```bash
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-## Linux CPU quick start
+## Local Linux CPU
 
-Prerequisites: Linux, Python 3.10+, CMake and a C/C++ toolchain.
+The generic CLI still supports building a local runtime when deliberately developing outside the production Kaggle notebook:
 
 ```bash
 python -m pip install -e .
 mageflow-native runtime build --backend cpu
 mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
-mageflow-native generate \
-  --manifest configs/mage-flow-turbo-q8-reference.json \
-  --prompt "A small red fox sitting in a quiet green forest" \
-  --output output
 ```
 
-## NVIDIA CUDA quick start
-
-Prerequisites: an NVIDIA GPU, CUDA toolkit, CMake and a C/C++ toolchain.
+## NVIDIA CUDA
 
 ```bash
 python -m pip install -e .
 mageflow-native runtime build --backend cuda
-mageflow-native doctor \
-  --manifest configs/mage-flow-turbo-q8-reference.json \
-  --backend cuda0
-mageflow-native generate \
-  --manifest configs/mage-flow-turbo-q8-reference.json \
-  --backend cuda0 \
-  --prompt "A small red fox" \
-  --output output
+mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json --backend cuda0
 ```
 
-Release qualification uses explicit deterministic placement (`cpu` or `cuda0`), never `auto` or `--auto-fit`.
-
-## CLI
-
-```text
-mageflow-native doctor
-mageflow-native verify
-mageflow-native generate
-mageflow-native serve
-mageflow-native runtime build --backend cpu|cuda
-```
+Release qualification uses deterministic placement (`cpu` or `cuda0`), never inference auto-splitting.
 
 ## REST API
 
@@ -112,28 +98,23 @@ POST /v1/images/generate
 GET  /v1/artifacts/<png>
 ```
 
-Public exposure, when desired, is a separate authenticated gateway concern and is outside release qualification.
-
 ## Kaggle integration
 
-Kaggle is an adapter/reference environment rather than a hard dependency of the core. Kaggle-specific discovery lives under `integrations/kaggle/`; it maps mounted inputs into the generic manifest/runtime flow. See [docs/kaggle.md](docs/kaggle.md) and [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb).
+The public notebook [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) automatically detects the supported Kaggle accelerator. Public defaults are `RUN_MODE="experiment"` and `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainers can opt into one-shot `evidence` mode for the frozen `512 → 640 → 768 → 1024` matrix. See [docs/kaggle.md](docs/kaggle.md).
 
 ## Reproducibility and evidence
 
-Qualification records exact Git head, runtime provenance, model hashes, backend, prompt, seed, steps, CFG, thread count, resolution, exact argv, stdout/stderr, exit code, wall time, peak memory telemetry and PNG identity. Evidence archives are sanitized and clean-room verifiable.
-
-Canonical release request:
+The canonical request is:
 
 ```text
 prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
-size    = 512x512
 seed    = 42
 steps   = 4
 CFG     = 1.0
 threads = 4
 ```
 
-CPU and CUDA outputs may legitimately differ byte-for-byte across numerical backends.
+CPU and CUDA outputs may legitimately differ byte-for-byte across numerical backends. Evidence records exact source/runtime/model identity, backend, prompt, dimensions, timing class, memory telemetry and PNG SHA-256.
 
 ## Documentation
 
@@ -142,6 +123,7 @@ CPU and CUDA outputs may legitimately differ byte-for-byte across numerical back
 - [Local Linux](docs/local-linux.md)
 - [CUDA](docs/cuda.md)
 - [Kaggle](docs/kaggle.md)
+- [Canonical benchmarks](docs/BENCHMARKS-v1.0.0.md)
 - [REST API](docs/REST-API.md)
 - [Testing](docs/TESTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)

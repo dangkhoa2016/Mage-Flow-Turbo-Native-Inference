@@ -5,9 +5,9 @@
 [![Release](https://img.shields.io/github/v/release/dangkhoa2016/Mage-Flow-Turbo-Native-Inference)](https://github.com/dangkhoa2016/Mage-Flow-Turbo-Native-Inference/releases/tag/v1.0.0)
 [![License](https://img.shields.io/github/license/dangkhoa2016/Mage-Flow-Turbo-Native-Inference)](LICENSE)
 
-> 🌐 Ngôn ngữ / Language: **Tiếng Việt** | [English](README.md)
+> 🌐 Language / Ngôn ngữ: [English](README.md) | **Tiếng Việt**
 
-**Bộ công cụ suy luận native di động cho Mage-Flow-Turbo.** Repository này không định nghĩa mô hình mới và không huấn luyện hay fine-tune trọng số. Python đảm nhận cấu hình, kiểm tra, điều phối CLI/REST, vòng đời và thu thập evidence; việc suy luận mô hình thực tế do runtime native `stable-diffusion.cpp` (`sd-cli`) thực hiện.
+**Bộ công cụ suy luận native di động cho Mage-Flow-Turbo.** Dự án không huấn luyện hoặc sửa trọng số model. Python đảm nhận cấu hình, xác minh, điều phối CLI/REST, lifecycle và evidence; suy luận thực tế do runtime native `stable-diffusion.cpp` (`sd-cli`) thực hiện.
 
 ```text
 manifest → xác minh SHA-256 → runtime sd-cli đã pin
@@ -25,75 +25,61 @@ manifest → xác minh SHA-256 → runtime sd-cli đã pin
 | Diffusion model | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 |
 | Text encoder | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | GGUF Q4_K_M |
 | VAE | `diffusion_pytorch_model.safetensors` | SafeTensors |
-| Runtime native | `stable-diffusion.cpp` `sd-cli` | commit đã pin `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
-
-SHA-256 đông cứng được kiểm tra trước suy luận thật. Repository không chứa trọng số mô hình.
+| Runtime native | `stable-diffusion.cpp` `sd-cli` | commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
 
 ## Phạm vi qualification v1.0.0
 
-v1.0.0 sử dụng đúng một Git source head và một hợp đồng model/runtime đã đông cứng. Các mục tiêu qualification bắt buộc gồm:
-
-| Môi trường | Backend | Vai trò qualification |
+| Môi trường | Backend | Vai trò |
 |---|---|---|
 | Linux x86-64 | CPU | release target bắt buộc |
 | Linux + NVIDIA GPU | CUDA `cuda0` | release target bắt buộc |
-| Notebook Kaggle CPU | CPU adapter | integration target bắt buộc |
-| Notebook Kaggle T4/T4x2 | CUDA adapter `cuda0` trên physical GPU 0 | integration target bắt buộc |
+| Kaggle Accelerator=None | CPU tự chọn | production/evidence integration target |
+| Kaggle NVIDIA T4/T4x2 | CUDA `cuda0` tự chọn trên physical GPU 0 | production/evidence integration target |
 
-Multi-GPU, Vulkan, Metal, ROCm, SYCL, Windows và các backend khác không nằm trong mục tiêu qualification của v1.0.0.
+Production notebook Kaggle chỉ dùng **prebuilt runtime**: Accelerator=None chọn CPU; T4/T4x2 chọn CUDA0 slot 0; P100, TPU và accelerator khác fail closed. Không fallback CPU từ GPU không hỗ trợ và không source-build fallback.
 
-Kết quả PASS/FAIL cuối và evidence exact-head, bao gồm thời gian đo, telemetry RAM/VRAM, hash runtime binary, hash PNG acceptance, notebook đã chạy, release provenance và SHA-256 checksum, được phát hành cùng GitHub Release thay vì lưu như trạng thái động trong source tree.
+## Benchmark fresh CPU ↔ T4 canonical
+
+Hai evidence session authoritative dùng cùng notebook source, source HEAD, model inputs, prompt, seed, steps, CFG, threads và thứ tự matrix.
+
+| Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 512×512 | 215.816 s | 7.590 s | **28.43×** | 238.072 s | 27.209 s | **8.75×** | 7,930 MiB |
+| 640×640 | 338.014 s | 8.698 s | **38.86×** | 363.299 s | 29.040 s | **12.51×** | 8,356 MiB |
+| 768×768 | 491.700 s | 9.710 s | **50.64×** | 513.961 s | 30.072 s | **17.09×** | 8,702 MiB |
+| 1024×1024 | 939.371 s | 12.420 s | **75.63×** | 962.737 s | 33.047 s | **29.13×** | 9,316 MiB |
+
+**Headline:** ở 1024×1024, native generation trên T4 mất **12,420 giây** so với **939,371 giây** trên CPU — nhanh hơn **75.63×** khi so cùng resolution.
+
+Xem [evidence benchmark đầy đủ](docs/BENCHMARKS-v1.0.0.vi.md) để biết notebook/runtime hash, methodology và quy tắc diễn giải.
 
 ## Vì sao dùng native inference?
 
-Diffusion, text conditioning và giải mã VAE đều do `sd-cli` thực hiện; dự án không có vòng lặp suy luận PyTorch/Transformers. Python xác minh model, dựng subprocess argv tường minh với `shell=False`, giám sát tiến trình native và ghi evidence.
+Diffusion, text conditioning và VAE decoding do `sd-cli` thực hiện; không có vòng lặp inference PyTorch/Transformers trong dự án. Python xác minh model, dựng subprocess argv tường minh với `shell=False`, giám sát native process và ghi evidence.
 
 ## Xác minh model stack
-
-Model do người dùng cung cấp hoặc mount. Việc nạp dùng manifest JSON và fail closed nếu thiếu, mơ hồ hoặc hash không khớp.
 
 ```bash
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-## Bắt đầu nhanh Linux CPU
+## Linux CPU cục bộ
+
+Generic CLI vẫn hỗ trợ build runtime cục bộ khi chủ động phát triển ngoài production Kaggle notebook:
 
 ```bash
 python -m pip install -e .
 mageflow-native runtime build --backend cpu
 mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
-mageflow-native generate \
-  --manifest configs/mage-flow-turbo-q8-reference.json \
-  --prompt "A small red fox sitting in a quiet green forest" \
-  --output output
 ```
 
-## Bắt đầu nhanh NVIDIA CUDA
+## NVIDIA CUDA
 
 ```bash
 python -m pip install -e .
 mageflow-native runtime build --backend cuda
-mageflow-native doctor \
-  --manifest configs/mage-flow-turbo-q8-reference.json \
-  --backend cuda0
-mageflow-native generate \
-  --manifest configs/mage-flow-turbo-q8-reference.json \
-  --backend cuda0 \
-  --prompt "A small red fox" \
-  --output output
-```
-
-Qualification release dùng placement xác định (`cpu` hoặc `cuda0`), không dùng `auto` hay `--auto-fit`.
-
-## CLI
-
-```text
-mageflow-native doctor
-mageflow-native verify
-mageflow-native generate
-mageflow-native serve
-mageflow-native runtime build --backend cpu|cuda
+mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json --backend cuda0
 ```
 
 ## REST API
@@ -108,28 +94,23 @@ POST /v1/images/generate
 GET  /v1/artifacts/<png>
 ```
 
-Public exposure, nếu dùng, là phần gateway có authentication riêng và nằm ngoài qualification release.
-
 ## Kaggle
 
-Kaggle là môi trường adapter/reference, không phải hard dependency của core. Logic khám phá input Kaggle nằm trong `integrations/kaggle/` và ánh xạ mounted inputs vào flow manifest/runtime chung. Xem [docs/kaggle.md](docs/kaggle.md) và [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb).
+Notebook public [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) tự detect accelerator Kaggle được hỗ trợ. Mặc định public là `RUN_MODE="experiment"` và `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainer có thể bật one-shot `evidence` mode để chạy matrix đóng băng `512 → 640 → 768 → 1024`. Xem [docs/kaggle.vi.md](docs/kaggle.vi.md).
 
 ## Tái lập và evidence
 
-Qualification ghi exact Git head, runtime provenance, model hash, backend, prompt, seed, steps, CFG, threads, resolution, argv chính xác, stdout/stderr, exit code, wall time, peak memory telemetry và PNG identity. Evidence được sanitize và có thể clean-room verify.
-
-Canonical release request:
+Canonical request:
 
 ```text
 prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
-size    = 512x512
 seed    = 42
 steps   = 4
 CFG     = 1.0
 threads = 4
 ```
 
-Output CPU và CUDA có thể khác nhau ở mức byte do khác backend số học.
+Output CPU và CUDA có thể khác byte-for-byte do backend số học khác nhau. Evidence ghi exact source/runtime/model identity, backend, prompt, dimensions, timing class, memory telemetry và PNG SHA-256.
 
 ## Tài liệu
 
@@ -137,10 +118,11 @@ Output CPU và CUDA có thể khác nhau ở mức byte do khác backend số h�
 - [Model stack](docs/model-stack.md)
 - [Linux cục bộ](docs/local-linux.md)
 - [CUDA](docs/cuda.md)
-- [Kaggle](docs/kaggle.md)
+- [Kaggle](docs/kaggle.vi.md)
+- [Benchmark canonical](docs/BENCHMARKS-v1.0.0.vi.md)
 - [REST API](docs/REST-API.md)
-- [Kiểm thử](docs/TESTING.md)
-- [Xử lý sự cố](docs/TROUBLESHOOTING.md)
+- [Kiểm thử](docs/TESTING.vi.md)
+- [Xử lý sự cố](docs/TROUBLESHOOTING.vi.md)
 - [Đóng góp](.github/CONTRIBUTING.md)
 - [Chính sách bảo mật](.github/SECURITY.md)
 
