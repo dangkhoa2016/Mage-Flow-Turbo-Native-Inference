@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "model_family": "Mage-Flow-Turbo",
+  "components": {
+    "diffusion": {
+      "path": "models/transformer/diffusion_pytorch_model.safetensors",
+      "sha256": "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d",
+      "format": "safetensors"
+    },
+    "text_encoder": {
+      "path": "models/Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+      "sha256": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
+      "format": "gguf",
+      "quantization": "Q4_K_M"
+    },
+    "vae": {
+      "path": "models/vae/diffusion_pytorch_model.safetensors",
+      "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0",
+      "format": "safetensors"
+    }
+  }
+}

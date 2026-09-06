@@ -3,9 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import platform
 import subprocess
-import sys
 from pathlib import Path
 
 from mageflow_native.constants import (
@@ -16,12 +14,18 @@ from mageflow_native.constants import (
     CANONICAL_STEPS,
     CANONICAL_THREADS,
     CANONICAL_WIDTH,
-    SDCPP_COMMIT,
 )
 from mageflow_native.models.manifest import load_manifest, verify_manifest
 from mageflow_native.runtime.manager import RuntimeManager
 from mageflow_native.runtime.spec import BackendSpec, RuntimeBuildBackend
+from mageflow_native.telemetry import read_mem_available_kb
 from integrations.kaggle.input_adapter import build_kaggle_manifest
+from integrations.kaggle.profiles import (
+    BF16_HIGH_MEMORY_CPU_PROFILE,
+    Q8_REFERENCE_PROFILE,
+    validate_profile_environment,
+    validate_profile_result,
+)
 from integrations.kaggle.runtime_adapter import kaggle_cache_root, runtime_hint
 
 
@@ -41,18 +45,33 @@ def _source_head(repo_dir: Path) -> str:
         return "unknown"
 
 
+def _mem_total_kb() -> int:
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    phys_pages = int(os.sysconf("SC_PHYS_PAGES"))
+    return (page_size * phys_pages) // 1024
+
+
 def run_qualification(
     *,
     input_root: Path,
     work_root: Path,
     backend: str,
+    profile: str = Q8_REFERENCE_PROFILE,
     repo_dir: Path | None = None,
 ) -> dict:
+    mem_total_kb = _mem_total_kb()
+    mem_available_before_kb = read_mem_available_kb()
+    selected_profile = validate_profile_environment(
+        profile,
+        backend=backend,
+        mem_total_kb=mem_total_kb,
+    )
+
     manifest_path = build_kaggle_manifest(
         input_root=input_root,
-        output=work_root / "output" / "manifest.json",
+        output=work_root / "output" / f"manifest-{profile}.json",
+        profile=profile,
     )
-    # Resolve manifest so component paths point at the absolute mounted inputs.
     manifest_with_root = load_manifest(manifest_path, model_root=input_root)
     verified = verify_manifest(manifest_with_root)
 
@@ -77,9 +96,13 @@ def run_qualification(
     output_dir = work_root / "output"
     runs_dir = work_root / "output" / ".runs"
     output_dir.mkdir(parents=True, exist_ok=True)
+    request_id = f"qual-{profile}-{backend}"
 
     print(f"SOURCE_HEAD={_source_head(repo_dir) if repo_dir else 'n/a'}", flush=True)
+    print(f"QUALIFICATION_PROFILE={profile}", flush=True)
     print(f"QUALIFICATION_BACKEND={backend}", flush=True)
+    print(f"MEM_TOTAL_KB={mem_total_kb}", flush=True)
+    print(f"MEM_AVAILABLE_BEFORE_KB={mem_available_before_kb}", flush=True)
 
     result = run_generation(
         sd_cli,
@@ -94,32 +117,47 @@ def run_qualification(
         threads=CANONICAL_THREADS,
         output_dir=output_dir,
         runs_dir=runs_dir,
-        client_request_id=f"qual-{backend}",
+        client_request_id=request_id,
         timeout_seconds=2700,
         collect_cuda=(backend == "cuda0"),
     )
 
-    telemetry = json.loads(
-        (runs_dir / f"qual-{backend}" / "telemetry.json").read_text()
+    validate_profile_result(
+        profile,
+        minimum_mem_available_kb=result.minimum_mem_available_kb,
     )
+
     evidence = {
         "source_head": _source_head(repo_dir) if repo_dir else None,
         "runtime_commit": identity.pinned_commit,
         "runtime_version": identity.version_output,
         "devices": identity.devices_output,
+        "profile": selected_profile.name,
         "backend": backend,
+        "memory": {
+            "mem_total_kb": mem_total_kb,
+            "mem_available_before_kb": mem_available_before_kb,
+            "minimum_mem_available_kb": result.minimum_mem_available_kb,
+            "peak_sd_cli_rss_kb": result.peak_sd_cli_rss_kb,
+        },
         "models": {
             "diffusion": {
                 "filename": verified["diffusion"].name,
                 "sha256": manifest_with_root.diffusion.sha256,
+                "format": manifest_with_root.diffusion.format,
+                "quantization": manifest_with_root.diffusion.quantization,
             },
             "text_encoder": {
                 "filename": verified["text_encoder"].name,
                 "sha256": manifest_with_root.text_encoder.sha256,
+                "format": manifest_with_root.text_encoder.format,
+                "quantization": manifest_with_root.text_encoder.quantization,
             },
             "vae": {
                 "filename": verified["vae"].name,
                 "sha256": manifest_with_root.vae.sha256,
+                "format": manifest_with_root.vae.format,
+                "quantization": manifest_with_root.vae.quantization,
             },
         },
         "artifact": {
@@ -130,10 +168,9 @@ def run_qualification(
             "height": result.artifact.height,
         },
         "elapsed_ms": result.elapsed_ms,
-        "peak_sd_cli_rss_kb": result.peak_sd_cli_rss_kb,
         "gpu_peak_mib": result.gpu_peak_mib,
     }
-    evidence_path = work_root / "output" / f"qualification-{backend}.json"
+    evidence_path = work_root / "output" / f"qualification-{profile}-{backend}.json"
     evidence_path.write_text(
         json.dumps(evidence, indent=2) + "\n", encoding="utf-8"
     )
@@ -143,6 +180,11 @@ def run_qualification(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mageflow-kaggle-qualification")
     parser.add_argument("--backend", choices=["cpu", "cuda0"], required=True)
+    parser.add_argument(
+        "--profile",
+        choices=[Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE],
+        default=Q8_REFERENCE_PROFILE,
+    )
     parser.add_argument("--input-root", default="/kaggle/input")
     parser.add_argument("--work-root", default="/kaggle/working/mageflow-qualification")
     parser.add_argument("--repo-dir", default=None)
@@ -151,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         input_root=Path(args.input_root),
         work_root=Path(args.work_root),
         backend=args.backend,
+        profile=args.profile,
         repo_dir=Path(args.repo_dir) if args.repo_dir else None,
     )
     print(json.dumps(evidence, indent=2, ensure_ascii=False))
