@@ -27,9 +27,11 @@ def test_notebook_execution_counts_null():
 def test_notebook_clones_native_inference_repo():
     text = NOTEBOOK.read_text(encoding="utf-8")
     assert "Mage-Flow-Turbo-Native-Inference.git" in text
-    assert "integrations/kaggle/qualification" in text
+    assert "integrations.kaggle.input_adapter" in text
+    assert "from integrations.kaggle.input_adapter import build_kaggle_manifest" in text
 
 
 def test_notebook_references_generic_manifest_location():
     text = NOTEBOOK.read_text(encoding="utf-8")
-    assert "mageflow-qualification" in text
+    assert "build_kaggle_manifest" in text
+    assert "ALLOW_SOURCE_BUILD = False" in text
