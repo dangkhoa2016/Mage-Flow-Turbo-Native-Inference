@@ -22,6 +22,12 @@ def _write_placeholder(path: Path) -> Path:
     return path
 
 
+def _write_bytes(path: Path, data: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
 def test_discover_input_exact(tmp_path: Path):
     root = tmp_path / "input"
     path = _write_placeholder(
@@ -47,6 +53,44 @@ def test_discover_input_wrong_sha_fails(tmp_path: Path):
             root,
             filename=DIT_FILENAME,
             required_fragment="mage-flow-community-mage-flow-turbo/gguf/q8-0",
+            expected_sha256="0" * 64,
+        )
+
+
+def test_discover_input_disambiguates_by_sha_when_fragment_shares_filename(tmp_path: Path):
+    root = tmp_path / "input"
+    mirror = (
+        root / "g" / "mage-flow-community-mage-flow-turbo" / "pytorch" / "default" / "1"
+    )
+    transformer = _write_bytes(mirror / "transformer" / VAE_FILENAME, b"bf16-transformer-bytes")
+    vae = _write_bytes(mirror / "vae" / VAE_FILENAME, b"bf16-vae-bytes")
+    fragment = "mage-flow-community-mage-flow-turbo/pytorch/default"
+    assert discover_input(
+        root,
+        filename=VAE_FILENAME,
+        required_fragment=fragment,
+        expected_sha256=sha256_file(transformer),
+    ) == transformer
+    assert discover_input(
+        root,
+        filename=VAE_FILENAME,
+        required_fragment=fragment,
+        expected_sha256=sha256_file(vae),
+    ) == vae
+
+
+def test_discover_input_ambiguous_fragment_without_sha_match_fails_closed(tmp_path: Path):
+    root = tmp_path / "input"
+    mirror = (
+        root / "g" / "mage-flow-community-mage-flow-turbo" / "pytorch" / "default" / "1"
+    )
+    _write_bytes(mirror / "transformer" / VAE_FILENAME, b"bf16-transformer-bytes")
+    _write_bytes(mirror / "vae" / VAE_FILENAME, b"bf16-vae-bytes")
+    with pytest.raises(InputResolutionError):
+        discover_input(
+            root,
+            filename=VAE_FILENAME,
+            required_fragment="mage-flow-community-mage-flow-turbo/pytorch/default",
             expected_sha256="0" * 64,
         )
 
