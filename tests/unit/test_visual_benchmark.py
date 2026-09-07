@@ -231,7 +231,9 @@ def test_H10_blinding(tmp_path):
         _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
         _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
     out = tmp_path / "pkg"
-    result = bench.finalize_blind_package(out)
+    truth = tmp_path / "truth"
+    result = bench.finalize_blind_package(out, truth_dir=truth)
+    assert (truth / "private-truth-map.json").is_file()
     pub = json.loads((out / "public-blind-map.json").read_text())
     pub_text = (out / "public-blind-map.json").read_text()
     assert vb.Q8_PROFILE not in pub_text
@@ -239,17 +241,9 @@ def test_H10_blinding(tmp_path):
     commitment_file = out / "private-truth-map.json.sha256"
     with open(commitment_file) as f:
         commitment = f.read().strip()
-    private_bytes = json.dumps(
-        {
-            pid: {"A": vb.Q8_PROFILE, "B": vb.BF16_PROFILE}
-            for pid in sorted({f"P{i:02d}" for i in range(1, 11)})
-        },
-        indent=2,
-        sort_keys=True,
-        ensure_ascii=False,
-    ).encode("utf-8")
-    import hashlib
-    assert commitment == hashlib.sha256(private_bytes).hexdigest()
+    assert len(commitment) == 64
+    # The public package should NOT contain the private truth map
+    assert not (out / "private-truth-map.json").exists()
 
 
 def test_H11_no_real_inference_in_unit_tests(tmp_path, monkeypatch):
@@ -619,3 +613,153 @@ def test_preflight_host_fingerprint_mismatch(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Task 4 — true randomized blind A/B assignment tests
+# ---------------------------------------------------------------------------
+
+
+def _seeded_bench_for_blinding(tmp_path):
+    manifest_path = _make_template(tmp_path)
+    bench = vb.VisualBenchmark(
+        manifest_path,
+        repo_dir=tmp_path,
+        work_root=tmp_path / "work",
+        fake=True,
+    )
+    bench.fingerprint = vb.HostFingerprint(
+        hostname="host-a",
+        linux_boot_id="boot-1",
+        cpu_model="Fake CPU",
+        mem_total_kb=32768 * 1024,
+    )
+    return bench
+
+
+def test_BLD1_public_map_hides_identities(tmp_path, monkeypatch):
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    public_text = (out / "public-blind-map.json").read_text()
+    assert "q8-reference" not in public_text
+    assert "bf16-high-memory-cpu" not in public_text
+
+
+def test_BLD2_random_assignment_not_hardcoded(tmp_path, monkeypatch):
+    import secrets
+    bits = iter([0, 1, 0, 1, 1, 0, 1, 0, 0, 1])
+    monkeypatch.setattr(secrets, "randbits", lambda n: next(bits))
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    private = json.loads((truth / "private-truth-map.json").read_text())["pairs"]
+    a_is_q8 = [pid for pid in sorted(private) if private[pid]["A"] == vb.Q8_PROFILE]
+    a_is_bf16 = [pid for pid in sorted(private) if private[pid]["A"] == vb.BF16_PROFILE]
+    assert a_is_q8, "no pair has A=Q8; assignment is not random/hard-coded"
+    assert a_is_bf16, "no pair has A=BF16; assignment is not random/hard-coded"
+
+
+def test_BLD3_private_truth_map_exists(tmp_path, monkeypatch):
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    private_path = truth / "private-truth-map.json"
+    assert private_path.is_file()
+    data = json.loads(private_path.read_text())
+    assert data["benchmark_id"] == bench.manifest.benchmark_id
+    assert data["manifest_sha256"] == bench.manifest.sha256
+    assert data["source_head"] == bench.manifest.source_head
+    assert set(data["pairs"].keys()) == {f"P{i:02d}" for i in range(1, 11)}
+
+
+def test_BLD4_private_map_absent_from_public_output(tmp_path, monkeypatch):
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    assert not (out / "private-truth-map.json").exists()
+    assert (out / "private-truth-map.json.sha256").is_file()
+
+
+def test_BLD5_commitment_verifies(tmp_path, monkeypatch):
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    assert vb.verify_truth_map_commitment(
+        truth / "private-truth-map.json",
+        out / "private-truth-map.json.sha256",
+    ) is True
+
+
+def test_BLD6_modified_truth_map_fails_commitment(tmp_path, monkeypatch):
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    private = truth / "private-truth-map.json"
+    data = json.loads(private.read_text())
+    pid = sorted(data["pairs"])[0]
+    if data["pairs"][pid]["A"] == vb.Q8_PROFILE:
+        data["pairs"][pid]["A"] = vb.BF16_PROFILE
+    else:
+        data["pairs"][pid]["A"] = vb.Q8_PROFILE
+    private.write_text(json.dumps(data), encoding="utf-8")
+    assert vb.verify_truth_map_commitment(
+        private, out / "private-truth-map.json.sha256"
+    ) is False
+
+
+def test_BLD7_public_image_hashes_match_blind_images(tmp_path, monkeypatch):
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    out = tmp_path / "pkg"
+    truth = tmp_path / "truth"
+    bench.finalize_blind_package(out, truth_dir=truth)
+    public = json.loads((out / "public-blind-map.json").read_text())
+    for pid, info in public.items():
+        a_img = out / "blind" / pid / info["a"]
+        b_img = out / "blind" / pid / info["b"]
+        import hashlib
+        assert hashlib.sha256(a_img.read_bytes()).hexdigest() == info["a_png_sha256"]
+        assert hashlib.sha256(b_img.read_bytes()).hexdigest() == info["b_png_sha256"]
+
+
+def test_BLD8_unsafe_truth_output_overlap_fails_closed(tmp_path, monkeypatch):
+    import secrets
+    monkeypatch.setattr(secrets, "randbits", lambda n: 0)
+    bench = _seeded_bench_for_blinding(tmp_path)
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+    same = tmp_path / "pkg"
+    with pytest.raises(vb.VisualBenchmarkError):
+        bench.finalize_blind_package(same, truth_dir=same)
+    truth = tmp_path / "truth"
+    out_in_truth = truth / "inner" / "pkg"
+    with pytest.raises(vb.VisualBenchmarkError):
+        bench.finalize_blind_package(out_in_truth, truth_dir=truth)
+    truth_in_out = same / "inner" / "truth"
+    with pytest.raises(vb.VisualBenchmarkError):
+        bench.finalize_blind_package(same, truth_dir=truth_in_out)
