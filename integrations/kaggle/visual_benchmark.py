@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -386,6 +387,16 @@ class PreparedProfileAssets:
     manifest_path: Path
     manifest: ModelManifest
     verified_paths: dict[str, Path]
+
+
+def verify_truth_map_commitment(
+    truth_map_path: Path,
+    commitment_path: Path,
+) -> bool:
+    actual_bytes = truth_map_path.read_bytes()
+    actual_hash = hashlib.sha256(actual_bytes).hexdigest()
+    expected = commitment_path.read_text(encoding="utf-8").strip()
+    return actual_hash == expected
 
 
 class VisualBenchmark:
@@ -831,40 +842,102 @@ class VisualBenchmark:
             return False
         return True
 
-    def finalize_blind_package(self, output: Path) -> dict:
+    def _assign_blind_ab(self) -> dict[str, dict[str, str]]:
+        assignment: dict[str, dict[str, str]] = {}
+        for prompt in sorted(self.manifest.prompts, key=lambda p: p["id"]):
+            swap = bool(secrets.randbits(1))
+            if swap:
+                assignment[prompt["id"]] = {"A": BF16_PROFILE, "B": Q8_PROFILE}
+            else:
+                assignment[prompt["id"]] = {"A": Q8_PROFILE, "B": BF16_PROFILE}
+        return assignment
+
+    def finalize_blind_package(
+        self,
+        output: Path,
+        *,
+        truth_dir: Path | None = None,
+    ) -> dict:
         db = self._collect_pass_db()
         if len(db) != 20:
             raise VisualBenchmarkError(f"only {len(db)} valid passed runs; need 20")
+
+        if truth_dir is not None:
+            output = Path(output)
+            truth_dir = Path(truth_dir)
+            try:
+                output.resolve().relative_to(truth_dir.resolve())
+                raise VisualBenchmarkError(
+                    "output directory must not be inside truth_dir"
+                )
+            except VisualBenchmarkError:
+                raise
+            except ValueError:
+                pass
+            try:
+                truth_dir.resolve().relative_to(output.resolve())
+                raise VisualBenchmarkError(
+                    "truth_dir must not be inside output directory"
+                )
+            except VisualBenchmarkError:
+                raise
+            except ValueError:
+                pass
+
+        assignment = self._assign_blind_ab()
         public_map: dict[str, dict] = {}
         private_map: dict[str, dict] = {}
         blind_dir = output / "blind"
         for prompt in sorted(self.manifest.prompts, key=lambda p: p["id"]):
-            q8 = db[f"{prompt['id']}/{Q8_PROFILE}"]
-            bf16 = db[f"{prompt['id']}/{BF16_PROFILE}"]
             pair_id = prompt["id"]
+            q8_rec = db[f"{pair_id}/{Q8_PROFILE}"]
+            bf16_rec = db[f"{pair_id}/{BF16_PROFILE}"]
+            ab = assignment[pair_id]
+            if ab["A"] == Q8_PROFILE:
+                a_rec, b_rec = q8_rec, bf16_rec
+            else:
+                a_rec, b_rec = bf16_rec, q8_rec
             a_label = f"{pair_id}-A.png"
             b_label = f"{pair_id}-B.png"
             (blind_dir / pair_id).mkdir(parents=True, exist_ok=True)
-            Path(blind_dir / pair_id / a_label).write_bytes(
-                Path(q8["png_path"]).read_bytes()
-            )
-            Path(blind_dir / pair_id / b_label).write_bytes(
-                Path(bf16["png_path"]).read_bytes()
-            )
+            a_bytes = Path(a_rec["png_path"]).read_bytes()
+            b_bytes = Path(b_rec["png_path"]).read_bytes()
+            (blind_dir / pair_id / a_label).write_bytes(a_bytes)
+            (blind_dir / pair_id / b_label).write_bytes(b_bytes)
             public_map[pair_id] = {
                 "a": a_label,
                 "b": b_label,
                 "prompt": prompt["prompt"],
                 "seed": prompt["seed"],
+                "a_png_sha256": hashlib.sha256(a_bytes).hexdigest(),
+                "b_png_sha256": hashlib.sha256(b_bytes).hexdigest(),
             }
             private_map[pair_id] = {
-                "A": Q8_PROFILE,
-                "B": BF16_PROFILE,
+                "A": ab["A"],
+                "B": ab["B"],
+                "a_png_sha256": hashlib.sha256(a_bytes).hexdigest(),
+                "b_png_sha256": hashlib.sha256(b_bytes).hexdigest(),
             }
-        private_bytes = json.dumps(
-            private_map, indent=2, sort_keys=True, ensure_ascii=False
-        ).encode("utf-8")
-        commitment = hashlib.sha256(private_bytes).hexdigest()
+
+        if truth_dir is not None:
+            truth_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(
+                truth_dir / "private-truth-map.json",
+                {
+                    "benchmark_id": self.manifest.benchmark_id,
+                    "manifest_sha256": self.manifest.sha256,
+                    "source_head": self.manifest.source_head,
+                    "pairs": private_map,
+                },
+            )
+            truth_bytes = (truth_dir / "private-truth-map.json").read_bytes()
+            commitment = hashlib.sha256(truth_bytes).hexdigest()
+        else:
+            private_bytes = json.dumps(
+                private_map, indent=2, sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")
+            commitment = hashlib.sha256(private_bytes).hexdigest()
+
         atomic_write_json(output / "public-blind-map.json", public_map)
         (output / "private-truth-map.json.sha256").write_text(
             commitment + "\n", encoding="utf-8"
@@ -889,6 +962,7 @@ class VisualBenchmark:
             "private_truth_map_commitment": commitment,
             "truth_map_sha256_file": str(output / "private-truth-map.json.sha256"),
             "blind_dir": str(blind_dir),
+            "truth_dir": str(truth_dir) if truth_dir else None,
         }
 
 
@@ -900,11 +974,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input-root", default=None)
     parser.add_argument("--fake", action="store_true", help="mock generation (tests only)")
     parser.add_argument("--output", default=None)
+    parser.add_argument("--truth-dir", default=None)
+    parser.add_argument("--truth-map", default=None)
+    parser.add_argument("--commitment-file", default=None)
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--validate-only", action="store_true")
     actions.add_argument("--plan", action="store_true")
     actions.add_argument("--run", action="store_true")
     actions.add_argument("--finalize-blind-package", action="store_true")
+    actions.add_argument("--verify-truth-map", action="store_true")
     args = parser.parse_args(argv)
 
     bench = VisualBenchmark(
@@ -927,11 +1005,27 @@ def main(argv: list[str] | None = None) -> int:
         aggregate = bench.run()
         print(json.dumps(aggregate, indent=2))
         return 0
+    if args.verify_truth_map:
+        if not args.truth_map or not args.commitment_file:
+            print("--truth-map and --commitment-file required for --verify-truth-map")
+            return 2
+        ok = verify_truth_map_commitment(
+            Path(args.truth_map),
+            Path(args.commitment_file),
+        )
+        print(f"TRUTH_MAP_COMMITMENT={'PASS' if ok else 'FAIL'}")
+        return 0 if ok else 1
     if args.finalize_blind_package:
         if not args.output:
             print("--output required for --finalize-blind-package")
             return 2
-        result = bench.finalize_blind_package(Path(args.output))
+        if not args.truth_dir:
+            print("--truth-dir required for --finalize-blind-package")
+            return 2
+        result = bench.finalize_blind_package(
+            Path(args.output),
+            truth_dir=Path(args.truth_dir),
+        )
         print(json.dumps(result, indent=2))
         return 0
     return 2
