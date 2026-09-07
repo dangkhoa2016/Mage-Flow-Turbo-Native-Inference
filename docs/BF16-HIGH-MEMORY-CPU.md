@@ -69,3 +69,40 @@ Fail-fast RAM policy: the BF16 minimum visible RAM of 27 GiB and the 3 GiB minim
 The 512×512 gate is accepted only when model and runtime verification pass, `sd-cli` exits successfully, the PNG is valid, CPU is the selected backend, and minimum observed available memory remains at or above 3 GiB.
 
 Only after this gate passes should a fresh CPU session run the same 512 → 640 → 768 → 1024 matrix for direct Q8 versus BF16 comparison. Until real BF16 evidence exists, this profile is experimental qualification infrastructure and must not be described as release-qualified.
+
+## Paired Q8 versus BF16 CPU comparison
+
+For a same-host CPU qualification comparison, run both matrices in the same session on the same host, with the same prebuilt `sd-cli`, the same source HEAD, the same frozen request (seed 42, 4 steps, CFG 1.0, 4 threads, fox prompt) and the same resolution list 512 → 640 → 768 → 1024. Use separate clean work roots and never run the two matrices concurrently:
+
+```bash
+python -m integrations.kaggle.qualification_matrix \
+  --backend cpu --profile q8-reference \
+  --input-root /kaggle/input \
+  --work-root /kaggle/working/mageflow-q8-matrix-paired \
+  --repo-dir "$PWD"
+```
+
+```bash
+python -m integrations.kaggle.qualification_matrix \
+  --backend cpu --profile bf16-high-memory-cpu \
+  --input-root /kaggle/input \
+  --work-root /kaggle/working/mageflow-bf16-matrix-paired \
+  --repo-dir "$PWD"
+```
+
+The matrix harness is CPU-only and rejects any non-`cpu` backend before model resolution or generation. Both the `q8-reference` and `bf16-high-memory-cpu` profiles consume the same prebuilt CPU `sd-cli`; no source build, no CMake and no compilation.
+
+Each profile writes a per-resolution record that includes a fresh `mem_available_before_run_kb` sample taken immediately before generation, an optional `mem_available_after_run_kb` recorded after the child process exits, `minimum_mem_available_kb`, `peak_sd_cli_rss_kb`, `elapsed_ms` and artifact identity. The aggregate keeps a separate matrix-level `setup.mem_available_before_kb` snapshot.
+
+After both matrices pass, compare evidence offline without running inference:
+
+```bash
+python -m integrations.kaggle.compare_matrix_evidence \
+  --q8-aggregate  /kaggle/working/mageflow-q8-matrix-paired/output/qualification-matrix-q8-reference-cpu.json \
+  --bf16-aggregate /kaggle/working/mageflow-bf16-matrix-paired/output/qualification-matrix-bf16-high-memory-cpu-cpu.json \
+  --output /kaggle/working/mageflow-q8-vs-bf16-comparison/comparison-q8-vs-bf16-cpu.json
+```
+
+The comparison utility verifies comparability (same source HEAD, CPU backend, runtime SHA and commit, resolution list, prompt, seed, steps, CFG, threads, text encoder SHA and VAE SHA, plus the expected Q8 and BF16 diffusion identities) before computing elapsed and RSS ratios. If any gate fails it reports `COMPARABILITY=FAIL` and emits no misleading performance ratios.
+
+This comparison reports **same-host CPU qualification comparison** evidence only. The experimental BF16 profile and the Q8 reference profile are compared on latency and memory; the result is not a release qualification, does not claim visual superiority, and must not be described as proof of a minimum 27 GiB requirement for a full 1024 matrix.
