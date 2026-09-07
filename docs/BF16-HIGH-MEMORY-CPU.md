@@ -43,6 +43,27 @@ python -m integrations.kaggle.qualification \
 
 The canonical request remains seed 42, 4 steps, CFG 1.0, 4 threads and the frozen fox prompt. Evidence records exact model identities, runtime identity, total RAM, pre-run available RAM, minimum available RAM, peak `sd-cli` RSS, elapsed time and PNG identity.
 
+Gate 1 512 has run successfully on a fresh CPU-only Kaggle session at source HEAD `ee9119e8831558353dd514ef41fe867808e327b9`: model/runtime verification passed, CPU backend, artifact is a valid 512×512 PNG, minimum observed `MemAvailable` stayed at or above 3 GiB.
+
+## Resolution matrix qualification
+
+The matrix command resolves models, verifies model artifacts and verifies the runtime **once per matrix process**, then runs the frozen canonical request sequentially at 512 → 640 → 768 → 1024:
+
+```bash
+python -m integrations.kaggle.qualification_matrix \
+  --backend cpu \
+  --profile bf16-high-memory-cpu \
+  --input-root /kaggle/input \
+  --work-root /kaggle/working/mageflow-bf16-matrix \
+  --repo-dir "$PWD"
+```
+
+The matrix is qualification evidence for feasibility, memory behavior, latency and artifact correctness; it is **not release qualification** and performs no visual-quality comparison. Only width and height change between runs; prompt, seed, steps, CFG and threads are frozen.
+
+The matrix requires an explicit prebuilt CPU runtime via `MAGE_CPU_PREBUILT_SD_CLI` and **no source build**. Setup runs once: RAM probe, profile preflight, manifest build, manifest verification, prebuilt `sd-cli` resolution, runtime identity and binary SHA verification. Setup timing telemetry is recorded separately so artifact-verification overhead, runtime-verification overhead and inference latency can be distinguished.
+
+Fail-fast RAM policy: the BF16 minimum visible RAM of 27 GiB and the 3 GiB minimum observed `MemAvailable` are retained. If headroom falls below 3 GiB, the current resolution is recorded as failed, partial evidence is written and the matrix stops immediately; no later resolution runs. The 640/768/1024 matrix must produce real evidence before any cross-resolution timing or memory claims are published.
+
 ## Acceptance
 
 The 512×512 gate is accepted only when model and runtime verification pass, `sd-cli` exits successfully, the PNG is valid, CPU is the selected backend, and minimum observed available memory remains at or above 3 GiB.

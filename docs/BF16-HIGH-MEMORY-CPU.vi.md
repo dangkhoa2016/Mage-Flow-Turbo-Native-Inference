@@ -43,6 +43,27 @@ python -m integrations.kaggle.qualification \
 
 Canonical request vẫn giữ seed 42, 4 steps, CFG 1.0, 4 threads và prompt cáo đỏ đã đóng băng. Evidence ghi exact model identities, runtime identity, tổng RAM, RAM khả dụng trước khi chạy, RAM khả dụng thấp nhất, peak RSS của `sd-cli`, elapsed time và PNG identity.
 
+Gate 1 512 đã chạy thành công trên phiên Kaggle CPU-only mới tại source HEAD `ee9119e8831558353dd514ef41fe867808e327b9`: model/runtime verification PASS, backend CPU, artifact là PNG 512×512 hợp lệ, `MemAvailable` thấp nhất quan sát được vẫn từ 3 GiB trở lên.
+
+## Qualification matrix theo resolution
+
+Lệnh matrix resolve model, verify model artifact và verify runtime **đúng một lần cho mỗi tiến trình matrix**, sau đó chạy canonical request đã đóng băng tuần tự 512 → 640 → 768 → 1024:
+
+```bash
+python -m integrations.kaggle.qualification_matrix \
+  --backend cpu \
+  --profile bf16-high-memory-cpu \
+  --input-root /kaggle/input \
+  --work-root /kaggle/working/mageflow-bf16-matrix \
+  --repo-dir "$PWD"
+```
+
+Matrix chỉ là evidence qualification về feasibility, hành vi bộ nhớ, latency và artifact correctness; matrix **không phải release qualification** và không so sánh chất lượng hình ảnh. Chỉ width và height thay đổi giữa các lượt; prompt, seed, steps, CFG và threads bị đóng băng.
+
+Matrix yêu cầu runtime CPU prebuilt tường minh qua `MAGE_CPU_PREBUILT_SD_CLI` và **không build từ source**. Setup chỉ chạy một lần: đo RAM, profile preflight, build manifest, verify manifest, resolve `sd-cli` prebuilt, verify runtime identity và SHA của binary. Setup timing telemetry được ghi riêng để phân biệt overhead verify artifact, overhead verify runtime và latency inference thật.
+
+Fail-fast RAM policy được giữ nguyên: RAM hiển thị tối thiểu 27 GiB và `MemAvailable` tối thiểu quan sát được 3 GiB. Nếu headroom xuống dưới 3 GiB, resolution hiện tại bị ghi là failed, partial evidence được ghi và matrix dừng ngay; không chạy resolution nào sau đó. Matrix 640/768/1024 phải có evidence thật trước khi công bố bất kỳ so sánh timing hoặc bộ nhớ giữa các resolution.
+
 ## Acceptance
 
 Gate 512×512 chỉ được chấp nhận khi model/runtime verification PASS, `sd-cli` thoát thành công, PNG hợp lệ, backend được chọn là CPU và minimum available memory quan sát được vẫn từ 3 GiB trở lên.
