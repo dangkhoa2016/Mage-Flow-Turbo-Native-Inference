@@ -30,6 +30,8 @@ from integrations.kaggle.profiles import (
 from integrations.kaggle.runtime_adapter import kaggle_cache_root
 
 MATRIX_RESOLUTIONS = [512, 640, 768, 1024]
+CPU_BACKEND = "cpu"
+MATRIX_BACKENDS = (CPU_BACKEND,)
 BF16_CPU_RUNTIME_ENV = "MAGE_CPU_PREBUILT_SD_CLI"
 BF16_CPU_RUNTIME_SHA256 = (
     "7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c"
@@ -159,6 +161,11 @@ def run_matrix(
     output_dir = work_root / "output"
 
     try:
+        if backend not in MATRIX_BACKENDS:
+            raise ValueError(
+                f"matrix harness is CPU-only; unsupported backend: {backend!r}"
+            )
+
         mem_total_kb = _mem_total_kb()
         mem_available_before_kb = read_mem_available_kb()
         validate_profile_environment(profile, backend=backend, mem_total_kb=mem_total_kb)
@@ -233,7 +240,34 @@ def run_matrix(
         for resolution in resolutions:
             width = height = resolution
             request_id = f"qual-{profile}-{backend}-{resolution:04d}"
+
+            mem_available_before_run_kb = read_mem_available_kb()
+            if mem_available_before_run_kb is None:
+                error = {
+                    "phase": "telemetry",
+                    "type": "MissingTelemetryError",
+                    "message": (
+                        "per-run memory available telemetry (before) is missing"
+                    ),
+                }
+                failed = {"resolution": resolution}
+                records.append(
+                    _write_record(
+                        context,
+                        output_dir,
+                        resolution,
+                        status="failed",
+                        error=error,
+                        mem_available_before_run_kb=None,
+                        mem_available_after_run_kb=None,
+                    )
+                )
+                print(f"MATRIX_GENERATION {resolution} FAIL telemetry", flush=True)
+                break
+
             print(f"MATRIX_GENERATION {resolution} START", flush=True)
+            result = None
+            error = None
             try:
                 result = run_generation(
                     sd_cli,
@@ -258,46 +292,29 @@ def run_matrix(
                     "type": type(exc).__name__,
                     "message": str(exc),
                 }
-                failed = {"resolution": resolution}
-                records.append(
-                    _write_record(
-                        context, output_dir, resolution, status="failed", error=error
-                    )
-                )
-                print(f"MATRIX_GENERATION {resolution} FAIL {error['type']}", flush=True)
-                break
 
-            if result.minimum_mem_available_kb is None:
+            mem_available_after_run_kb = read_mem_available_kb()
+
+            if error is None and result.minimum_mem_available_kb is None:
                 error = {
                     "phase": "telemetry",
                     "type": "MissingTelemetryError",
                     "message": "minimum memory available telemetry is missing",
                 }
-                failed = {"resolution": resolution}
-                records.append(
-                    _write_record(
-                        context,
-                        output_dir,
-                        resolution,
-                        status="failed",
-                        error=error,
-                        result=result,
+            if error is None:
+                try:
+                    validate_profile_result(
+                        profile,
+                        minimum_mem_available_kb=result.minimum_mem_available_kb,
                     )
-                )
-                print(f"MATRIX_GENERATION {resolution} FAIL telemetry", flush=True)
-                break
+                except ProfilePreflightError as exc:
+                    error = {
+                        "phase": "headroom",
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    }
 
-            try:
-                validate_profile_result(
-                    profile,
-                    minimum_mem_available_kb=result.minimum_mem_available_kb,
-                )
-            except ProfilePreflightError as exc:
-                error = {
-                    "phase": "headroom",
-                    "type": type(exc).__name__,
-                    "message": str(exc),
-                }
+            if error is not None:
                 failed = {"resolution": resolution}
                 records.append(
                     _write_record(
@@ -307,9 +324,11 @@ def run_matrix(
                         status="failed",
                         error=error,
                         result=result,
+                        mem_available_before_run_kb=mem_available_before_run_kb,
+                        mem_available_after_run_kb=mem_available_after_run_kb,
                     )
                 )
-                print(f"MATRIX_GENERATION {resolution} FAIL headroom", flush=True)
+                print(f"MATRIX_GENERATION {resolution} FAIL {error['type']}", flush=True)
                 break
 
             completed.append(resolution)
@@ -320,6 +339,8 @@ def run_matrix(
                     resolution,
                     status="passed",
                     result=result,
+                    mem_available_before_run_kb=mem_available_before_run_kb,
+                    mem_available_after_run_kb=mem_available_after_run_kb,
                 )
             )
             print(
@@ -370,6 +391,8 @@ def _write_record(
     status: str,
     error: dict | None = None,
     result=None,
+    mem_available_before_run_kb: int | None = None,
+    mem_available_after_run_kb: int | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     record = {
@@ -388,7 +411,8 @@ def _write_record(
         },
         "memory": {
             "mem_total_kb": context["mem_total_kb"],
-            "mem_available_before_run_kb": context["mem_available_before_kb"],
+            "mem_available_before_run_kb": mem_available_before_run_kb,
+            "mem_available_after_run_kb": mem_available_after_run_kb,
             "minimum_mem_available_kb": (
                 result.minimum_mem_available_kb if result is not None else None
             ),
@@ -432,7 +456,7 @@ def _write_aggregate(output_dir: Path, aggregate: dict, *, profile: str, backend
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mageflow-kaggle-qualification-matrix")
-    parser.add_argument("--backend", choices=["cpu", "cuda0"], required=True)
+    parser.add_argument("--backend", choices=list(MATRIX_BACKENDS), required=True)
     parser.add_argument(
         "--profile",
         choices=[Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE],
