@@ -446,6 +446,13 @@ def _preflight_bench(tmp_path):
     )
 
 
+def _mock_env_gate(monkeypatch):
+    monkeypatch.setattr(
+        "integrations.kaggle.profiles.validate_profile_environment",
+        lambda *a, **kw: object(),
+    )
+
+
 def _fake_model_manifest_for(profile, tmp_path):
     from mageflow_native.models.manifest import ModelComponent, ModelManifest
     diffusion_sha = (
@@ -476,6 +483,7 @@ def _mock_build_manifest(monkeypatch):
 
 def test_preflight_q8_input_discovery_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     monkeypatch.setattr(
         "integrations.kaggle.input_adapter.build_kaggle_manifest",
         lambda *a, **kw: (_ for _ in ()).throw(vb.VisualBenchmarkError("input not found")),
@@ -486,6 +494,7 @@ def test_preflight_q8_input_discovery_fails(tmp_path, monkeypatch):
 
 def test_preflight_bf16_input_discovery_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     call_count = [0]
 
     def selective_build(*args, **kwargs):
@@ -507,6 +516,7 @@ def test_preflight_bf16_input_discovery_fails(tmp_path, monkeypatch):
 
 def test_preflight_q8_model_verification_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     _mock_build_manifest(monkeypatch)
     monkeypatch.setattr(
         "integrations.kaggle.visual_benchmark.load_manifest",
@@ -522,6 +532,7 @@ def test_preflight_q8_model_verification_fails(tmp_path, monkeypatch):
 
 def test_preflight_bf16_model_verification_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     _mock_build_manifest(monkeypatch)
     call_count = [0]
 
