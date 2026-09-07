@@ -177,9 +177,9 @@ def test_B1_canonical_request_propagated_from_records(tmp_path):
 
 def test_B2_cross_profile_request_mismatch_fails_closed(tmp_path):
     q8 = _aggregate_with_requests(cmp.Q8_PROFILE, dit_sha=cmp.Q8_DIFFUSION_SHA256,
-                                  elapsed=[10, 20, 30, 40])
+                                   elapsed=[10, 20, 30, 40])
     bf16 = _aggregate_with_requests(cmp.BF16_PROFILE, dit_sha=cmp.BF16_DIFFUSION_SHA256,
-                                    elapsed=[20, 40, 60, 80])
+                                     elapsed=[20, 40, 60, 80])
     bf16["matrix"][2]["request"]["seed"] = 43
     q8p = tmp_path / "q8.json"
     bf16p = tmp_path / "bf16.json"
@@ -191,6 +191,26 @@ def test_B2_cross_profile_request_mismatch_fails_closed(tmp_path):
     assert result["comparability"] == "failed"
     assert "comparison" not in result
     assert "aggregate" not in result
+
+
+def test_B2b_true_cross_profile_mismatch_fails_closed(tmp_path):
+    q8 = _aggregate_with_requests(cmp.Q8_PROFILE, dit_sha=cmp.Q8_DIFFUSION_SHA256,
+                                   elapsed=[10, 20, 30, 40])
+    bf16 = _aggregate_with_requests(cmp.BF16_PROFILE, dit_sha=cmp.BF16_DIFFUSION_SHA256,
+                                     elapsed=[20, 40, 60, 80])
+    for record in bf16["matrix"]:
+        record["request"]["seed"] = 43
+    q8p = tmp_path / "q8.json"
+    bf16p = tmp_path / "bf16.json"
+    q8p.write_text(json.dumps(q8), encoding="utf-8")
+    bf16p.write_text(json.dumps(bf16), encoding="utf-8")
+
+    result = cmp.build_comparison(q8p, bf16p)
+    assert result["status"] == "failed"
+    assert result["comparability"] == "failed"
+    assert "comparison" not in result
+    assert "aggregate" not in result
+    assert any("cross-profile" in e for e in result["errors"])
 
 
 def test_B3_internal_inconsistency_fails_closed(tmp_path):
