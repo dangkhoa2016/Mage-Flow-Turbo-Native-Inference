@@ -141,6 +141,10 @@ def _patch_run_generation(monkeypatch, calls, *, raise_at=None) -> None:
     monkeypatch.setattr(qm, "run_generation", fake)
 
 
+def _patch_mem_total(monkeypatch) -> None:
+    monkeypatch.setattr(qm, "_mem_total_kb", lambda: 64 * 1024 * 1024)
+
+
 @pytest.fixture
 def matrix_env(monkeypatch, tmp_path):
     work_root = tmp_path / "work"
@@ -151,6 +155,7 @@ def matrix_env(monkeypatch, tmp_path):
     verify_calls: list = []
     gen_calls: list = []
 
+    _patch_mem_total(monkeypatch)
     _install_runtime(monkeypatch, tmp_path)
     _patch_manifest_build(monkeypatch, manifest, build_calls)
     _patch_manifest_verify(monkeypatch, manifest, verify_calls)
@@ -318,6 +323,7 @@ def test_cpu_bf16_rejects_cuda_backend_before_any_generation(matrix_env):
 def test_missing_prebuilt_runtime_fails_before_any_generation(monkeypatch, tmp_path):
     gen_calls: list = []
     _patch_run_generation(monkeypatch, gen_calls)
+    _patch_mem_total(monkeypatch)
     work_root = tmp_path / "work"
     code, aggregate = qm.run_matrix(
         input_root=tmp_path / "input",
@@ -336,6 +342,7 @@ def test_runtime_sha_mismatch_fails_before_any_generation(monkeypatch, tmp_path)
     cli = _write_executable(tmp_path)
     monkeypatch.setenv("MAGE_CPU_PREBUILT_SD_CLI", str(cli))
     monkeypatch.setattr(qm, "BF16_CPU_RUNTIME_SHA256", "0" * 64)
+    _patch_mem_total(monkeypatch)
     manifest = _fake_manifest(tmp_path)
     _patch_manifest_build(monkeypatch, manifest, [])
     _patch_manifest_verify(monkeypatch, manifest, [])
@@ -367,6 +374,7 @@ def test_missing_telemetry_stops_matrix(monkeypatch, tmp_path):
         )
 
     _install_runtime(monkeypatch, tmp_path)
+    _patch_mem_total(monkeypatch)
     manifest = _fake_manifest(tmp_path)
     _patch_manifest_build(monkeypatch, manifest, [])
     _patch_manifest_verify(monkeypatch, manifest, [])
