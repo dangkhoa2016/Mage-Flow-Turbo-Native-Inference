@@ -44,7 +44,15 @@ def _make_harness(tmp_path):
     return bench
 
 
+def _run_item(bench, prompt_id, profile):
+    return next(
+        i for i in bench.run_plan if i.prompt_id == prompt_id and i.profile == profile
+    )
+
+
 def _write_passed_record(bench, prompt_id, profile, *, png_sha=None):
+    item = _run_item(bench, prompt_id, profile)
+    attempt_id = f"vis-{prompt_id}-{profile}-attempt-001"
     rec = {
         "status": "passed",
         "benchmark_id": bench.manifest.benchmark_id,
@@ -52,7 +60,9 @@ def _write_passed_record(bench, prompt_id, profile, *, png_sha=None):
         "source_head": bench.manifest.source_head,
         "host_fingerprint": bench.fingerprint.to_dict(),
         "prompt_id": prompt_id,
+        "prompt_class": item.prompt_class,
         "profile": profile,
+        "execution_index": item.execution_index,
         "request": {
             "prompt": next(
                 p["prompt"] for p in bench.manifest.prompts if p["id"] == prompt_id
@@ -65,6 +75,7 @@ def _write_passed_record(bench, prompt_id, profile, *, png_sha=None):
             "steps": 4,
             "cfg": 1.0,
             "threads": 4,
+            "backend": vb.CPU_BACKEND,
         },
         "runtime": {
             "commit": vb.RUNTIME_COMMIT,
@@ -85,6 +96,11 @@ def _write_passed_record(bench, prompt_id, profile, *, png_sha=None):
         },
         "elapsed_ms": 100,
         "memory": {"peak_sd_cli_rss_kb": 1000},
+        "attempt": {
+            "attempt_id": attempt_id,
+            "run_dir": str(bench.work_root / ".runs" / attempt_id),
+            "previous_attempts": [],
+        },
         "png_path": str(bench.root.image_path(prompt_id, profile)),
         "png_sha256": png_sha,
     }
@@ -208,12 +224,18 @@ def test_H13_runtime_identity_mismatch_not_skipped(tmp_path):
 def test_H8_aggregate_rebuild_nondestructive(tmp_path, monkeypatch):
     bench = _make_harness(tmp_path)
     monkeypatch.setattr(bench, "_resolve_runtime", lambda: tmp_path / "nonexistent")
-    full = _write_passed_record(bench, "P01", vb.Q8_PROFILE)
-    full2 = _write_passed_record(bench, "P01", vb.BF16_PROFILE)
-    agg = bench.rebuild_aggregate([full, full2, bench._failed_record(
-        next(i for i in bench.run_plan if i.prompt_id == "P02"), RuntimeError("x"))])
-    assert agg["total_pairs"] == 1
-    assert agg["pairs"][0]["prompt_id"] == "P01"
+    records = []
+    for prompt in bench.manifest.prompts:
+        records.append(_write_passed_record(bench, prompt["id"], vb.Q8_PROFILE))
+        records.append(_write_passed_record(bench, prompt["id"], vb.BF16_PROFILE))
+    records.append(bench._failed_record(
+        next(i for i in bench.run_plan if i.prompt_id == "P02"), RuntimeError("x")))
+    agg = bench.rebuild_aggregate(records)
+    assert agg["total_pairs"] == 10
+    assert [p["prompt_id"] for p in agg["pairs"]] == [f"P{i:02d}" for i in range(1, 11)]
+    for pair in agg["pairs"]:
+        assert pair["q8"]["status"] == "passed"
+        assert pair["bf16"]["status"] == "passed"
 
 
 def test_H9_atomic_persistence(tmp_path):
@@ -350,7 +372,7 @@ def test_real_run_cli_dispatches_to_harness(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 1.2 — prove _run_single() passes real prepared manifests, not stubs
+# Task 1.2 — prove _run_single() passes real prepared manifests for Q8 AND BF16
 # ---------------------------------------------------------------------------
 
 
@@ -388,26 +410,13 @@ def test_run_single_passes_prepared_manifests_not_stubs(tmp_path, monkeypatch):
             stubs_used.append(type(manifest).__name__)
         from mageflow_native.inference.runner import GenerationResult, ArtifactInfo
         from pathlib import Path as P
+        request_id = kw["client_request_id"]
         out_dir = P(kw["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)
-        fake_png = out_dir / "test.png"
-        import struct, zlib
-        def _write_minimal_png(p):
-            sig = b'\x89PNG\r\n\x1a\n'
-            ihdr_data = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
-            ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data)
-            ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc & 0xffffffff)
-            raw = b'\x00\xff\x00\x00'
-            idat_data = zlib.compress(raw)
-            idat_crc = zlib.crc32(b'IDAT' + idat_data)
-            idat = struct.pack('>I', len(idat_data)) + b'IDAT' + idat_data + struct.pack('>I', idat_crc & 0xffffffff)
-            iend_crc = zlib.crc32(b'IEND')
-            iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc & 0xffffffff)
-            with open(p, 'wb') as f:
-                f.write(sig + ihdr + idat + iend)
-        _write_minimal_png(fake_png)
+        fake_png = out_dir / f"{request_id}.png"
+        fake_png.write_bytes(b"FAKEPNG")
         return GenerationResult(
-            request_id="test", seed=kw["seed"], exit_code=0, elapsed_ms=10,
+            request_id=request_id, seed=kw["seed"], exit_code=0, elapsed_ms=10,
             peak_sd_cli_rss_kb=100, minimum_mem_available_kb=100,
             gpu_peak_mib=None,
             artifact=ArtifactInfo(
@@ -421,13 +430,15 @@ def test_run_single_passes_prepared_manifests_not_stubs(tmp_path, monkeypatch):
     monkeypatch.setattr(bench, "_resolve_runtime", lambda: tmp_path / "fake-cli")
     monkeypatch.setattr(bench, "_verify_runtime", lambda p: _FakeRuntime(p))
 
-    item = bench.run_plan[0]
     sd_cli = tmp_path / "fake-cli"
-    bench._run_single(item, sd_cli, None, prepared_assets=prepared)
+    q8_item = next(i for i in bench.run_plan if i.profile == vb.Q8_PROFILE)
+    bf16_item = next(i for i in bench.run_plan if i.profile == vb.BF16_PROFILE)
 
-    assert q8_manifest_passed is q8_manifest or bf16_manifest_passed is bf16_manifest, (
-        "at least one profile should receive its prepared manifest"
-    )
+    bench._run_single(q8_item, sd_cli, None, prepared_assets=prepared)
+    bench._run_single(bf16_item, sd_cli, None, prepared_assets=prepared)
+
+    assert q8_manifest_passed is q8_assets.manifest, "Q8 must receive its prepared manifest"
+    assert bf16_manifest_passed is bf16_assets.manifest, "BF16 must receive its prepared manifest"
     assert len(stubs_used) == 0, f"stub objects were passed: {stubs_used}"
 
 
@@ -443,6 +454,13 @@ def _preflight_bench(tmp_path):
         repo_dir=tmp_path,
         work_root=tmp_path / "work",
         input_root=tmp_path / "input",
+    )
+
+
+def _mock_env_gate(monkeypatch):
+    monkeypatch.setattr(
+        "integrations.kaggle.profiles.validate_profile_environment",
+        lambda *a, **kw: object(),
     )
 
 
@@ -476,6 +494,7 @@ def _mock_build_manifest(monkeypatch):
 
 def test_preflight_q8_input_discovery_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     monkeypatch.setattr(
         "integrations.kaggle.input_adapter.build_kaggle_manifest",
         lambda *a, **kw: (_ for _ in ()).throw(vb.VisualBenchmarkError("input not found")),
@@ -486,6 +505,7 @@ def test_preflight_q8_input_discovery_fails(tmp_path, monkeypatch):
 
 def test_preflight_bf16_input_discovery_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     call_count = [0]
 
     def selective_build(*args, **kwargs):
@@ -507,6 +527,7 @@ def test_preflight_bf16_input_discovery_fails(tmp_path, monkeypatch):
 
 def test_preflight_q8_model_verification_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     _mock_build_manifest(monkeypatch)
     monkeypatch.setattr(
         "integrations.kaggle.visual_benchmark.load_manifest",
@@ -522,6 +543,7 @@ def test_preflight_q8_model_verification_fails(tmp_path, monkeypatch):
 
 def test_preflight_bf16_model_verification_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
+    _mock_env_gate(monkeypatch)
     _mock_build_manifest(monkeypatch)
     call_count = [0]
 
@@ -763,3 +785,292 @@ def test_BLD8_unsafe_truth_output_overlap_fails_closed(tmp_path, monkeypatch):
     truth_in_out = same / "inner" / "truth"
     with pytest.raises(vb.VisualBenchmarkError):
         bench.finalize_blind_package(same, truth_dir=truth_in_out)
+
+
+# ---------------------------------------------------------------------------
+# contract hardening 1 — full canonical run-record contract (resume identity)
+# ---------------------------------------------------------------------------
+
+
+def _item_for_profile(bench, profile):
+    return next(i for i in bench.run_plan if i.profile == profile)
+
+
+def _tamper_and_reload(bench, item, mutator):
+    rec = _write_passed_record(bench, item.prompt_id, item.profile)
+    mutator(rec)
+    path = bench.root.record_path(item.prompt_id, item.profile)
+    path.write_text(json.dumps(rec), encoding="utf-8")
+    return rec
+
+
+CONTRACT_TAMPERS = [
+    (
+        "q8-diffusion",
+        vb.Q8_PROFILE,
+        lambda r: r["models"]["diffusion"].update({"sha256": "1" * 64}),
+    ),
+    (
+        "bf16-diffusion",
+        vb.BF16_PROFILE,
+        lambda r: r["models"]["diffusion"].update({"sha256": "1" * 64}),
+    ),
+    (
+        "text-encoder",
+        vb.Q8_PROFILE,
+        lambda r: r["models"]["text_encoder"].update({"sha256": "1" * 64}),
+    ),
+    (
+        "vae",
+        vb.Q8_PROFILE,
+        lambda r: r["models"]["vae"].update({"sha256": "1" * 64}),
+    ),
+    (
+        "runtime-sha",
+        vb.Q8_PROFILE,
+        lambda r: r["runtime"].update({"sha256": "1" * 64}),
+    ),
+    (
+        "runtime-commit",
+        vb.Q8_PROFILE,
+        lambda r: r["runtime"].update({"commit": "1" * 40}),
+    ),
+    (
+        "backend",
+        vb.Q8_PROFILE,
+        lambda r: r["request"].update({"backend": "gpu"}),
+    ),
+    (
+        "request-seed",
+        vb.Q8_PROFILE,
+        lambda r: r["request"].update({"seed": r["request"]["seed"] + 1}),
+    ),
+    (
+        "missing-png-sha",
+        vb.Q8_PROFILE,
+        lambda r: r.pop("png_sha256"),
+    ),
+    (
+        "canonical-png-path-mismatch",
+        vb.Q8_PROFILE,
+        lambda r: r.update({"png_path": "/tmp/not-the-canonical.png"}),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case,profile,mutator",
+    CONTRACT_TAMPERS,
+    ids=[c[0] for c in CONTRACT_TAMPERS],
+)
+def test_CONTRACT_tampered_field_not_resumable(tmp_path, case, profile, mutator):
+    bench = _make_harness(tmp_path)
+    item = _item_for_profile(bench, profile)
+    _tamper_and_reload(bench, item, mutator)
+    assert bench._is_resume_safe(item) is False
+
+
+def test_CONTRACT_untampered_record_is_resumable_for_both_profiles(tmp_path):
+    bench = _make_harness(tmp_path)
+    for profile in (vb.Q8_PROFILE, vb.BF16_PROFILE):
+        item = _item_for_profile(bench, profile)
+        _write_passed_record(bench, item.prompt_id, item.profile)
+        assert bench._is_resume_safe(item) is True
+
+
+# ---------------------------------------------------------------------------
+# contract hardening 2 — blind package must use the canonical contract validator
+# ---------------------------------------------------------------------------
+
+
+def _seed_all_pair_records(bench):
+    for prompt in bench.manifest.prompts:
+        _write_passed_record(bench, prompt["id"], vb.Q8_PROFILE)
+        _write_passed_record(bench, prompt["id"], vb.BF16_PROFILE)
+
+
+def test_BLIND_reject_tampered_shared_vae_sha(tmp_path):
+    bench = _make_harness(tmp_path)
+    _seed_all_pair_records(bench)
+    rec_path = bench.root.record_path("P01", vb.Q8_PROFILE)
+    rec = json.loads(rec_path.read_text())
+    rec["models"]["vae"]["sha256"] = "1" * 64
+    rec_path.write_text(json.dumps(rec), encoding="utf-8")
+    with pytest.raises(vb.VisualBenchmarkError, match="19 valid passed runs; need 20"):
+        bench.finalize_blind_package(tmp_path / "pkg", truth_dir=tmp_path / "truth")
+
+
+def test_BLIND_reject_tampered_request_backend(tmp_path):
+    bench = _make_harness(tmp_path)
+    _seed_all_pair_records(bench)
+    rec_path = bench.root.record_path("P05", vb.BF16_PROFILE)
+    rec = json.loads(rec_path.read_text())
+    rec["request"]["backend"] = "gpu"
+    rec_path.write_text(json.dumps(rec), encoding="utf-8")
+    with pytest.raises(vb.VisualBenchmarkError, match="19 valid passed runs; need 20"):
+        bench.finalize_blind_package(tmp_path / "pkg", truth_dir=tmp_path / "truth")
+
+
+def test_BLIND_accepts_fully_valid_records(tmp_path):
+    bench = _make_harness(tmp_path)
+    _seed_all_pair_records(bench)
+    result = bench.finalize_blind_package(tmp_path / "pkg", truth_dir=tmp_path / "truth")
+    assert (tmp_path / "pkg" / "public-blind-map.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# contract hardening 3 — aggregate must use the canonical contract validator
+# ---------------------------------------------------------------------------
+
+
+def test_AGGREGATE_rejects_tampered_shared_text_encoder_sha(tmp_path):
+    bench = _make_harness(tmp_path)
+    q8 = _write_passed_record(bench, "P01", vb.Q8_PROFILE)
+    bf16 = _write_passed_record(bench, "P01", vb.BF16_PROFILE)
+    q8["models"]["text_encoder"]["sha256"] = "1" * 64
+    with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
+        bench.rebuild_aggregate([q8, bf16])
+
+
+def test_AGGREGATE_rejects_tampered_request_seed(tmp_path):
+    bench = _make_harness(tmp_path)
+    q8 = _write_passed_record(bench, "P02", vb.Q8_PROFILE)
+    bf16 = _write_passed_record(bench, "P02", vb.BF16_PROFILE)
+    q8["request"]["seed"] += 1
+    with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
+        bench.rebuild_aggregate([q8, bf16])
+
+
+def test_AGGREGATE_rejects_prompt_when_both_profiles_are_invalid(tmp_path):
+    bench = _make_harness(tmp_path)
+    records = []
+    for prompt in bench.manifest.prompts:
+        records.append(_write_passed_record(bench, prompt["id"], vb.Q8_PROFILE))
+        records.append(_write_passed_record(bench, prompt["id"], vb.BF16_PROFILE))
+    for rec in records:
+        if rec["prompt_id"] != "P05":
+            continue
+        if rec["profile"] == vb.Q8_PROFILE:
+            rec["models"]["text_encoder"]["sha256"] = "1" * 64
+        else:
+            rec["models"]["vae"]["sha256"] = "1" * 64
+    with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
+        bench.rebuild_aggregate(records)
+
+
+def test_AGGREGATE_complete_20_record_set_succeeds(tmp_path):
+    bench = _make_harness(tmp_path)
+    records = []
+    for prompt in bench.manifest.prompts:
+        records.append(_write_passed_record(bench, prompt["id"], vb.Q8_PROFILE))
+        records.append(_write_passed_record(bench, prompt["id"], vb.BF16_PROFILE))
+    agg = bench.rebuild_aggregate(records)
+    assert agg["total_pairs"] == 10
+    assert {p["prompt_id"] for p in agg["pairs"]} == {
+        f"P{i:02d}" for i in range(1, 11)
+    }
+    for pair in agg["pairs"]:
+        assert pair["q8"]["profile"] == vb.Q8_PROFILE
+        assert pair["bf16"]["profile"] == vb.BF16_PROFILE
+        assert pair["q8"]["status"] == "passed"
+        assert pair["bf16"]["status"] == "passed"
+
+
+# ---------------------------------------------------------------------------
+# contract hardening 4 — retry attempt isolation regression
+# ---------------------------------------------------------------------------
+
+
+def _retry_prepared_assets(tmp_path):
+    return {
+        vb.Q8_PROFILE: _make_prepared(vb.Q8_PROFILE, tmp_path),
+        vb.BF16_PROFILE: _make_prepared(vb.BF16_PROFILE, tmp_path),
+    }
+
+
+def test_RETRY_failed_attempt_then_new_run_dir_succeeds(tmp_path, monkeypatch):
+    from mageflow_native.inference.runner import GenerationResult, ArtifactInfo
+
+    bench = _make_harness(tmp_path)
+    monkeypatch.setattr(vb, "_source_head", lambda repo_dir: HEAD)
+    monkeypatch.setattr(
+        bench,
+        "_resolve_runtime",
+        lambda: (tmp_path / "work" / ".runs-mock"),
+    )
+    monkeypatch.setattr(bench, "_verify_runtime", lambda p: _FakeRuntime(p))
+    monkeypatch.setattr(
+        bench,
+        "_prepare_all_profile_assets",
+        lambda: _retry_prepared_assets(tmp_path),
+    )
+
+    target = next(
+        i for i in bench.run_plan
+        if i.prompt_id == "P05" and i.profile == vb.Q8_PROFILE
+    )
+    target_prefix = f"vis-{target.prompt_id}-{target.profile}"
+    real_run_gen = vb.run_generation
+    fail_state = {"count": 0}
+
+    def flaky_gen(sd_cli, manifest, backend_spec, **kw):
+        request_id = kw["client_request_id"]
+        runs_dir = Path(kw["runs_dir"])
+        if not request_id.startswith(target_prefix):
+            return real_run_gen(sd_cli, manifest, backend_spec, **kw)
+        run_dir = runs_dir / request_id
+        if run_dir.exists():
+            raise FileExistsError(f"run dir already exists: {run_dir}")
+        run_dir.mkdir(parents=True, exist_ok=False)
+        if fail_state["count"] == 0:
+            fail_state["count"] += 1
+            raise RuntimeError("boom: first attempt failed")
+        fail_state["count"] += 1
+        out_dir = Path(kw["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{request_id}.png"
+        out_path.write_bytes(b"FAKEPNG")
+        return GenerationResult(
+            request_id=request_id, seed=kw["seed"], exit_code=0, elapsed_ms=10,
+            peak_sd_cli_rss_kb=100, minimum_mem_available_kb=100,
+            gpu_peak_mib=None,
+            artifact=ArtifactInfo(
+                filename=out_path.name, bytes=out_path.stat().st_size,
+                sha256="aa", width=1, height=1,
+            ),
+            stdout_path="", stderr_path="",
+        )
+
+    monkeypatch.setattr(vb, "run_generation", flaky_gen)
+
+    # First run: target attempt-001 fails; other 19 items pass.
+    with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
+        bench.run()
+
+    attempt_001_name = f"vis-{target.prompt_id}-{target.profile}-attempt-001"
+    run_dir_001 = tmp_path / "work" / ".runs" / attempt_001_name
+    assert run_dir_001.is_dir(), "attempt-001 physical run dir must exist"
+
+    failed_rec = json.loads(
+        bench.root.record_path(target.prompt_id, target.profile).read_text()
+    )
+    assert failed_rec["status"] == "failed"
+    assert failed_rec["attempt"]["attempt_id"] == attempt_001_name
+
+    # Second run: retry must allocate attempt-002 and succeed.
+    agg = bench.run()
+    assert agg["total_pairs"] == 10
+
+    passed_rec = json.loads(
+        bench.root.record_path(target.prompt_id, target.profile).read_text()
+    )
+    assert passed_rec["status"] == "passed"
+    attempt = passed_rec["attempt"]
+    assert attempt["attempt_id"] == (
+        f"vis-{target.prompt_id}-{target.profile}-attempt-002"
+    )
+    assert attempt_001_name in attempt["previous_attempts"]
+    assert attempt["run_dir"] != str(run_dir_001)
+    assert run_dir_001.is_dir(), "attempt-001 directory must be preserved"
+    attempt_002_dir = tmp_path / "work" / ".runs" / attempt["attempt_id"]
+    assert attempt_002_dir.is_dir(), "retry must create a distinct physical run dir"
