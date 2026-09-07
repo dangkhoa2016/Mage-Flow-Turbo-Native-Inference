@@ -322,6 +322,13 @@ class RunPlanItem:
     seed: int
 
 
+@dataclass(frozen=True)
+class AttemptSpec:
+    attempt_id: str
+    run_dir: Path
+    previous_attempts: list[str]
+
+
 def build_run_plan(manifest: Manifest) -> list[RunPlanItem]:
     plan: list[RunPlanItem] = []
     index = 0
@@ -422,6 +429,9 @@ class VisualBenchmark:
         self.fake = fake
         self.fingerprint = HostFingerprint.current()
         self.run_plan = build_run_plan(self.manifest)
+        self._run_item_index = {
+            (i.prompt_id, i.profile): i for i in self.run_plan
+        }
 
     def validate(self) -> None:
         errors: list[str] = []
@@ -472,51 +482,90 @@ class VisualBenchmark:
         if errors:
             raise VisualBenchmarkError(";\n".join(errors))
 
-    def _validate_run_item_for_resume(self, item: RunPlanItem, record: dict) -> list[str]:
+    def _validate_run_item_contract(self, item: RunPlanItem, record: dict) -> list[str]:
+        """Canonical per-run record contract. An empty list means the record is
+        valid evidence for this exact run-plan item."""
         errors: list[str] = []
+        tag = f"{item.prompt_id}/{item.profile}"
         if record.get("status") != "passed":
-            errors.append(f"{item.prompt_id}/{item.profile}: record status not passed")
+            errors.append(f"{tag}: record status not passed")
+        if record.get("benchmark_id") != self.manifest.benchmark_id:
+            errors.append(f"{tag}: benchmark_id mismatch")
         if record.get("manifest_sha256") != self.manifest.sha256:
-            errors.append(f"{item.prompt_id}/{item.profile}: manifest sha mismatch")
+            errors.append(f"{tag}: manifest sha mismatch")
         if record.get("source_head") != self.manifest.source_head:
-            errors.append(f"{item.prompt_id}/{item.profile}: source_head mismatch")
+            errors.append(f"{tag}: source_head mismatch")
         if record.get("host_fingerprint") != self.fingerprint.to_dict():
-            errors.append(f"{item.prompt_id}/{item.profile}: host fingerprint mismatch")
+            errors.append(f"{tag}: host fingerprint mismatch")
+        if record.get("prompt_id") != item.prompt_id:
+            errors.append(f"{tag}: prompt_id mismatch")
+        if record.get("prompt_class") != item.prompt_class:
+            errors.append(f"{tag}: prompt_class mismatch")
+        if record.get("profile") != item.profile:
+            errors.append(f"{tag}: profile mismatch")
+        if record.get("execution_index") != item.execution_index:
+            errors.append(f"{tag}: execution_index mismatch")
         req = record.get("request") or {}
         if req.get("prompt") != item.prompt:
-            errors.append(f"{item.prompt_id}/{item.profile}: prompt mismatch")
+            errors.append(f"{tag}: prompt mismatch")
         if req.get("seed") != item.seed:
-            errors.append(f"{item.prompt_id}/{item.profile}: seed mismatch")
+            errors.append(f"{tag}: seed mismatch")
         if req.get("width") != self.manifest.resolution:
-            errors.append(f"{item.prompt_id}/{item.profile}: width mismatch")
+            errors.append(f"{tag}: width mismatch")
         if req.get("height") != self.manifest.resolution:
-            errors.append(f"{item.prompt_id}/{item.profile}: height mismatch")
+            errors.append(f"{tag}: height mismatch")
         if req.get("steps") != self.manifest.steps:
-            errors.append(f"{item.prompt_id}/{item.profile}: steps mismatch")
+            errors.append(f"{tag}: steps mismatch")
         if req.get("cfg") != self.manifest.cfg:
-            errors.append(f"{item.prompt_id}/{item.profile}: cfg mismatch")
+            errors.append(f"{tag}: cfg mismatch")
         if req.get("threads") != self.manifest.threads:
-            errors.append(f"{item.prompt_id}/{item.profile}: threads mismatch")
+            errors.append(f"{tag}: threads mismatch")
+        if req.get("backend") != CPU_BACKEND:
+            errors.append(f"{tag}: backend mismatch")
         rec_runtime = record.get("runtime") or {}
         if rec_runtime.get("sha256") != RUNTIME_SHA256:
-            errors.append(f"{item.prompt_id}/{item.profile}: runtime sha mismatch")
+            errors.append(f"{tag}: runtime sha mismatch")
         if rec_runtime.get("commit") != RUNTIME_COMMIT:
-            errors.append(f"{item.prompt_id}/{item.profile}: runtime commit mismatch")
-        rec_models = record.get("models") or {}
+            errors.append(f"{tag}: runtime commit mismatch")
         if item.profile == Q8_PROFILE:
             expected_diff = Q8_DIFFUSION_SHA256
-        else:
+        elif item.profile == BF16_PROFILE:
             expected_diff = BF16_DIFFUSION_SHA256
+        else:
+            expected_diff = None
+            errors.append(f"{tag}: unknown profile {item.profile!r}")
+        rec_models = record.get("models") or {}
         if rec_models.get("diffusion", {}).get("sha256") != expected_diff:
-            errors.append(f"{item.prompt_id}/{item.profile}: model identity mismatch")
-        img = self.root.image_path(item.prompt_id, item.profile)
+            errors.append(f"{tag}: diffusion model sha mismatch")
+        if rec_models.get("text_encoder", {}).get("sha256") != SHARED_TEXT_ENCODER_SHA256:
+            errors.append(f"{tag}: text encoder sha mismatch")
+        if rec_models.get("vae", {}).get("sha256") != SHARED_VAE_SHA256:
+            errors.append(f"{tag}: vae sha mismatch")
+        expected_png = self.root.image_path(item.prompt_id, item.profile)
+        if record.get("png_path") != str(expected_png):
+            errors.append(f"{tag}: png_path must point at canonical PNG")
         png_sha = record.get("png_sha256")
-        if not img.is_file():
-            errors.append(f"{item.prompt_id}/{item.profile}: PNG missing")
-        elif png_sha:
-            actual = sha256_file(img)
-            if actual != png_sha:
-                errors.append(f"{item.prompt_id}/{item.profile}: PNG sha mismatch")
+        if not isinstance(png_sha, str) or not _HEX64.match(png_sha):
+            errors.append(f"{tag}: png_sha256 missing or invalid")
+        if not expected_png.is_file():
+            errors.append(f"{tag}: canonical PNG missing")
+        else:
+            try:
+                actual = sha256_file(expected_png)
+                if isinstance(png_sha, str) and actual != png_sha:
+                    errors.append(f"{tag}: PNG sha mismatch")
+            except OSError:
+                errors.append(f"{tag}: canonical PNG unreadable")
+        attempt = record.get("attempt")
+        if not isinstance(attempt, dict):
+            errors.append(f"{tag}: attempt metadata missing")
+        else:
+            if not isinstance(attempt.get("attempt_id"), str) or not attempt.get("attempt_id"):
+                errors.append(f"{tag}: attempt_id invalid")
+            if not isinstance(attempt.get("run_dir"), str) or not attempt.get("run_dir"):
+                errors.append(f"{tag}: attempt run_dir invalid")
+            if not isinstance(attempt.get("previous_attempts"), list):
+                errors.append(f"{tag}: attempt previous_attempts invalid")
         return errors
 
     def _is_resume_safe(self, item: RunPlanItem) -> bool:
@@ -527,7 +576,7 @@ class VisualBenchmark:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return False
-        return not self._validate_run_item_for_resume(item, record)
+        return not self._validate_run_item_contract(item, record)
 
     def plan(self) -> dict:
         return plan_to_dict(self.run_plan)
@@ -590,6 +639,26 @@ class VisualBenchmark:
             prepared[profile] = self._prepare_profile_assets(profile)
         return prepared
 
+    def _next_attempt(self, item: RunPlanItem) -> AttemptSpec:
+        prefix = f"vis-{item.prompt_id}-{item.profile}-attempt-"
+        runs_dir = self.work_root / ".runs"
+        existing: list[str] = []
+        used: set[str] = set()
+        if runs_dir.is_dir():
+            for entry in runs_dir.iterdir():
+                if entry.is_dir() and entry.name.startswith(prefix):
+                    existing.append(entry.name)
+                    used.add(entry.name)
+        seq = 1
+        while f"{prefix}{seq:03d}" in used:
+            seq += 1
+        attempt_id = f"{prefix}{seq:03d}"
+        return AttemptSpec(
+            attempt_id=attempt_id,
+            run_dir=runs_dir / attempt_id,
+            previous_attempts=sorted(existing),
+        )
+
     def _run_single(
         self,
         item: RunPlanItem,
@@ -597,7 +666,10 @@ class VisualBenchmark:
         identity,
         *,
         prepared_assets: dict[str, PreparedProfileAssets],
+        attempt: AttemptSpec | None = None,
     ) -> dict:
+        if attempt is None:
+            attempt = self._next_attempt(item)
         mem_before = read_mem_available_kb()
         start = time.monotonic()
         assets = prepared_assets[item.profile]
@@ -614,9 +686,15 @@ class VisualBenchmark:
             threads=self.manifest.threads,
             output_dir=self.root.images_dir / item.prompt_id,
             runs_dir=self.work_root / ".runs",
-            client_request_id=f"vis-{item.prompt_id}-{item.profile}",
+            client_request_id=attempt.attempt_id,
             fake=self.fake,
         )
+        if result.request_id != attempt.attempt_id:
+            raise VisualBenchmarkError(
+                f"{item.prompt_id}/{item.profile}: runner request_id "
+                f"{result.request_id} != allocated attempt {attempt.attempt_id}"
+            )
+        physical_run_dir = self.work_root / ".runs" / result.request_id
         elapsed_ms = int((time.monotonic() - start) * 1000)
         mem_after = read_mem_available_kb()
         generated = (
@@ -665,6 +743,11 @@ class VisualBenchmark:
                     "sha256": assets.manifest.vae.sha256,
                 },
             },
+            "attempt": {
+                "attempt_id": result.request_id,
+                "run_dir": str(physical_run_dir),
+                "previous_attempts": attempt.previous_attempts,
+            },
             "elapsed_ms": elapsed_ms,
             "memory": {
                 "mem_available_before_run_kb": mem_before,
@@ -694,12 +777,17 @@ class VisualBenchmark:
                 )
                 records.append(record)
                 continue
+            attempt = self._next_attempt(item)
             try:
                 record = self._run_single(
-                    item, sd_cli, identity, prepared_assets=prepared_assets
+                    item,
+                    sd_cli,
+                    identity,
+                    prepared_assets=prepared_assets,
+                    attempt=attempt,
                 )
             except Exception as exc:
-                record = self._failed_record(item, exc)
+                record = self._failed_record(item, exc, attempt=attempt)
                 errors.append(f"{item.prompt_id}/{item.profile}: {exc}")
             atomic_write_json(
                 self.root.record_path(item.prompt_id, item.profile), record
@@ -709,8 +797,14 @@ class VisualBenchmark:
         atomic_write_json(self.root.root / "aggregate.json", aggregate)
         return aggregate
 
-    def _failed_record(self, item: RunPlanItem, exc: Exception) -> dict:
-        return {
+    def _failed_record(
+        self,
+        item: RunPlanItem,
+        exc: Exception,
+        *,
+        attempt: AttemptSpec | None = None,
+    ) -> dict:
+        record = {
             "schema_version": SCHEMA_VERSION,
             "benchmark_id": self.manifest.benchmark_id,
             "manifest_sha256": self.manifest.sha256,
@@ -733,6 +827,13 @@ class VisualBenchmark:
             "status": "failed",
             "error": str(exc),
         }
+        if attempt is not None:
+            record["attempt"] = {
+                "attempt_id": attempt.attempt_id,
+                "run_dir": str(attempt.run_dir),
+                "previous_attempts": attempt.previous_attempts,
+            }
+        return record
 
     def _ensure_fingerprint_file(self) -> None:
         meta = self.root.root / "host-fingerprint.json"
@@ -772,12 +873,11 @@ class VisualBenchmark:
 
     def rebuild_aggregate(self, records: list[dict]) -> dict:
         passed = [
-            r
-            for r in records
-            if r.get("status") == "passed"
-            and r.get("manifest_sha256") == self.manifest.sha256
-            and r.get("source_head") == self.manifest.source_head
-            and r.get("host_fingerprint") == self.fingerprint.to_dict()
+            rec
+            for rec in records
+            if (item := self._run_item_index.get((rec.get("prompt_id"), rec.get("profile"))))
+            is not None
+            and not self._validate_run_item_contract(item, rec)
         ]
         if not passed:
             raise VisualBenchmarkError("no valid passed per-run records for aggregate")
@@ -785,10 +885,27 @@ class VisualBenchmark:
         for rec in passed:
             pid = rec["prompt_id"]
             pairs.setdefault(pid, {})[rec["profile"]] = rec
-        incomplete = [pid for pid, r in pairs.items() if len(r) != 2]
-        if incomplete:
+        expected_prompt_ids = {p["id"] for p in self.manifest.prompts}
+        expected_profiles = {Q8_PROFILE, BF16_PROFILE}
+        actual_prompt_ids = set(pairs)
+        missing_prompt_ids = sorted(expected_prompt_ids - actual_prompt_ids)
+        unexpected_prompt_ids = sorted(actual_prompt_ids - expected_prompt_ids)
+        profile_mismatches = {
+            pid: sorted(set(pairs.get(pid, {})))
+            for pid in expected_prompt_ids
+            if set(pairs.get(pid, {})) != expected_profiles
+        }
+        if missing_prompt_ids or unexpected_prompt_ids or profile_mismatches:
             raise VisualBenchmarkError(
-                f"cannot build aggregate: incomplete pairs {incomplete}"
+                "cannot build aggregate: incomplete pairs "
+                f"missing={missing_prompt_ids} "
+                f"unexpected={unexpected_prompt_ids} "
+                f"mismatched={profile_mismatches}"
+            )
+        if len(pairs) != len(expected_prompt_ids):
+            raise VisualBenchmarkError(
+                "cannot build aggregate: "
+                f"expected {len(expected_prompt_ids)} complete pairs, got {len(pairs)}"
             )
         return {
             "benchmark_id": self.manifest.benchmark_id,
@@ -810,6 +927,9 @@ class VisualBenchmark:
         db: dict[str, dict] = {}
         for prompt in self.manifest.prompts:
             for profile in (Q8_PROFILE, BF16_PROFILE):
+                item = self._run_item_index.get((prompt["id"], profile))
+                if item is None:
+                    continue
                 path = self.root.record_path(prompt["id"], profile)
                 if not path.is_file():
                     continue
@@ -817,30 +937,9 @@ class VisualBenchmark:
                     record = json.loads(path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
                     continue
-                if self._resume_valid(record):
+                if not self._validate_run_item_contract(item, record):
                     db[f"{prompt['id']}/{profile}"] = record
         return db
-
-    def _resume_valid(self, record: dict) -> bool:
-        if record.get("status") != "passed":
-            return False
-        if record.get("manifest_sha256") != self.manifest.sha256:
-            return False
-        if record.get("source_head") != self.manifest.source_head:
-            return False
-        if record.get("host_fingerprint") != self.fingerprint.to_dict():
-            return False
-        img = Path(record.get("png_path") or "")
-        if not img.is_file():
-            return False
-        if record.get("png_sha256") and sha256_file(img) != record["png_sha256"]:
-            return False
-        rec_runtime = record.get("runtime") or {}
-        if rec_runtime.get("sha256") != RUNTIME_SHA256:
-            return False
-        if rec_runtime.get("commit") != RUNTIME_COMMIT:
-            return False
-        return True
 
     def _assign_blind_ab(self) -> dict[str, dict[str, str]]:
         assignment: dict[str, dict[str, str]] = {}
