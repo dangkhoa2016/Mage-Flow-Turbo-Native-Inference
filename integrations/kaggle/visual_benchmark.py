@@ -885,10 +885,27 @@ class VisualBenchmark:
         for rec in passed:
             pid = rec["prompt_id"]
             pairs.setdefault(pid, {})[rec["profile"]] = rec
-        incomplete = [pid for pid, r in pairs.items() if len(r) != 2]
-        if incomplete:
+        expected_prompt_ids = {p["id"] for p in self.manifest.prompts}
+        expected_profiles = {Q8_PROFILE, BF16_PROFILE}
+        actual_prompt_ids = set(pairs)
+        missing_prompt_ids = sorted(expected_prompt_ids - actual_prompt_ids)
+        unexpected_prompt_ids = sorted(actual_prompt_ids - expected_prompt_ids)
+        profile_mismatches = {
+            pid: sorted(set(pairs.get(pid, {})))
+            for pid in expected_prompt_ids
+            if set(pairs.get(pid, {})) != expected_profiles
+        }
+        if missing_prompt_ids or unexpected_prompt_ids or profile_mismatches:
             raise VisualBenchmarkError(
-                f"cannot build aggregate: incomplete pairs {incomplete}"
+                "cannot build aggregate: incomplete pairs "
+                f"missing={missing_prompt_ids} "
+                f"unexpected={unexpected_prompt_ids} "
+                f"mismatched={profile_mismatches}"
+            )
+        if len(pairs) != len(expected_prompt_ids):
+            raise VisualBenchmarkError(
+                "cannot build aggregate: "
+                f"expected {len(expected_prompt_ids)} complete pairs, got {len(pairs)}"
             )
         return {
             "benchmark_id": self.manifest.benchmark_id,

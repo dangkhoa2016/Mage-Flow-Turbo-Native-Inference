@@ -224,12 +224,18 @@ def test_H13_runtime_identity_mismatch_not_skipped(tmp_path):
 def test_H8_aggregate_rebuild_nondestructive(tmp_path, monkeypatch):
     bench = _make_harness(tmp_path)
     monkeypatch.setattr(bench, "_resolve_runtime", lambda: tmp_path / "nonexistent")
-    full = _write_passed_record(bench, "P01", vb.Q8_PROFILE)
-    full2 = _write_passed_record(bench, "P01", vb.BF16_PROFILE)
-    agg = bench.rebuild_aggregate([full, full2, bench._failed_record(
-        next(i for i in bench.run_plan if i.prompt_id == "P02"), RuntimeError("x"))])
-    assert agg["total_pairs"] == 1
-    assert agg["pairs"][0]["prompt_id"] == "P01"
+    records = []
+    for prompt in bench.manifest.prompts:
+        records.append(_write_passed_record(bench, prompt["id"], vb.Q8_PROFILE))
+        records.append(_write_passed_record(bench, prompt["id"], vb.BF16_PROFILE))
+    records.append(bench._failed_record(
+        next(i for i in bench.run_plan if i.prompt_id == "P02"), RuntimeError("x")))
+    agg = bench.rebuild_aggregate(records)
+    assert agg["total_pairs"] == 10
+    assert [p["prompt_id"] for p in agg["pairs"]] == [f"P{i:02d}" for i in range(1, 11)]
+    for pair in agg["pairs"]:
+        assert pair["q8"]["status"] == "passed"
+        assert pair["bf16"]["status"] == "passed"
 
 
 def test_H9_atomic_persistence(tmp_path):
@@ -933,6 +939,41 @@ def test_AGGREGATE_rejects_tampered_request_seed(tmp_path):
     q8["request"]["seed"] += 1
     with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
         bench.rebuild_aggregate([q8, bf16])
+
+
+def test_AGGREGATE_rejects_prompt_when_both_profiles_are_invalid(tmp_path):
+    bench = _make_harness(tmp_path)
+    records = []
+    for prompt in bench.manifest.prompts:
+        records.append(_write_passed_record(bench, prompt["id"], vb.Q8_PROFILE))
+        records.append(_write_passed_record(bench, prompt["id"], vb.BF16_PROFILE))
+    for rec in records:
+        if rec["prompt_id"] != "P05":
+            continue
+        if rec["profile"] == vb.Q8_PROFILE:
+            rec["models"]["text_encoder"]["sha256"] = "1" * 64
+        else:
+            rec["models"]["vae"]["sha256"] = "1" * 64
+    with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
+        bench.rebuild_aggregate(records)
+
+
+def test_AGGREGATE_complete_20_record_set_succeeds(tmp_path):
+    bench = _make_harness(tmp_path)
+    records = []
+    for prompt in bench.manifest.prompts:
+        records.append(_write_passed_record(bench, prompt["id"], vb.Q8_PROFILE))
+        records.append(_write_passed_record(bench, prompt["id"], vb.BF16_PROFILE))
+    agg = bench.rebuild_aggregate(records)
+    assert agg["total_pairs"] == 10
+    assert {p["prompt_id"] for p in agg["pairs"]} == {
+        f"P{i:02d}" for i in range(1, 11)
+    }
+    for pair in agg["pairs"]:
+        assert pair["q8"]["profile"] == vb.Q8_PROFILE
+        assert pair["bf16"]["profile"] == vb.BF16_PROFILE
+        assert pair["q8"]["status"] == "passed"
+        assert pair["bf16"]["status"] == "passed"
 
 
 # ---------------------------------------------------------------------------
