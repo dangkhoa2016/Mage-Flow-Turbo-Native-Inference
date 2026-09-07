@@ -57,6 +57,12 @@
     "diffusion_precision_change_only": true,
     "pair_order_policy": "odd prompt: q8-reference then bf16-high-memory-cpu; even prompt: bf16-high-memory-cpu then q8-reference"
   },
+  "model_input_policy": {
+    "default_input_root": "/kaggle/input",
+    "actual_bytes_must_be_sha256_verified": true,
+    "all_profiles_must_preflight_before_generation": true,
+    "download_during_benchmark": false
+  },
   "seed_policy": {
     "type": "explicit-frozen-seed-list",
     "description": "one seed per prompt, identical between Q8 and BF16",
@@ -209,9 +215,12 @@
   },
   "blinding_contract": {
     "primary": "blind side-by-side human evaluation",
-    "public_map_must_not_contain_profile_identity": true,
+    "assignment": "os-random-per-pair",
+    "assignment_must_not_be_derivable_from_public_artifacts": true,
     "private_truth_map_separate": true,
+    "private_truth_map_persisted": true,
     "truth_map_commitment_sha256_before_scoring": true,
+    "public_map_must_not_contain_profile_identity": true,
     "score_scale": [
       1,
       2,

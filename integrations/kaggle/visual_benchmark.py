@@ -6,13 +6,19 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from mageflow_native.inference.runner import run_generation
-from mageflow_native.models.manifest import sha256_file
+from mageflow_native.models.manifest import (
+    ModelManifest,
+    load_manifest,
+    sha256_file,
+    verify_manifest,
+)
 from mageflow_native.runtime.manager import RuntimeManager
 from mageflow_native.runtime.spec import BackendSpec
 from mageflow_native.telemetry import read_mem_available_kb
@@ -33,6 +39,8 @@ Q8_DIFFUSION_SHA256 = "4c3dafc143ee64121692b6b63563a4f5288bf6183c4870e1d65f15665
 BF16_DIFFUSION_SHA256 = "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d"
 SHARED_TEXT_ENCODER_SHA256 = "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a"
 SHARED_VAE_SHA256 = "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+
+_DEFAULT_INPUT_ROOT = "/kaggle/input"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -170,10 +178,40 @@ def load_benchmark_manifest(path: str | Path) -> Manifest:
         "prompts",
         "paired_run_size",
         "evidence_contract",
+        "model_input_policy",
+        "blinding_contract",
     }
     missing = required_top - set(data.keys())
     if missing:
         raise VisualBenchmarkError(f"manifest missing fields: {sorted(missing)}")
+
+    model_input_policy = data.get("model_input_policy") or {}
+    if model_input_policy.get("actual_bytes_must_be_sha256_verified") is not True:
+        raise VisualBenchmarkError(
+            "model_input_policy.actual_bytes_must_be_sha256_verified must be true"
+        )
+    if model_input_policy.get("all_profiles_must_preflight_before_generation") is not True:
+        raise VisualBenchmarkError(
+            "model_input_policy.all_profiles_must_preflight_before_generation must be true"
+        )
+    if model_input_policy.get("download_during_benchmark") is not False:
+        raise VisualBenchmarkError(
+            "model_input_policy.download_during_benchmark must be false"
+        )
+
+    blinding_contract = data.get("blinding_contract") or {}
+    if blinding_contract.get("assignment") != "os-random-per-pair":
+        raise VisualBenchmarkError(
+            "blinding_contract.assignment must be os-random-per-pair"
+        )
+    if blinding_contract.get("truth_map_commitment_sha256_before_scoring") is not True:
+        raise VisualBenchmarkError(
+            "blinding_contract.truth_map_commitment_sha256_before_scoring must be true"
+        )
+    if blinding_contract.get("public_map_must_not_contain_profile_identity") is not True:
+        raise VisualBenchmarkError(
+            "blinding_contract.public_map_must_not_contain_profile_identity must be true"
+        )
 
     source_head = data["source_head"]
     if source_head.startswith("__FREEZE"):
@@ -342,6 +380,14 @@ class BenchmarkRoot:
         return self.images_dir / prompt_id / f"{profile}.png"
 
 
+@dataclass(frozen=True)
+class PreparedProfileAssets:
+    profile: str
+    manifest_path: Path
+    manifest: ModelManifest
+    verified_paths: dict[str, Path]
+
+
 class VisualBenchmark:
     def __init__(
         self,
@@ -349,6 +395,7 @@ class VisualBenchmark:
         *,
         repo_dir: Path,
         work_root: Path,
+        input_root: str | Path | None = None,
         compile_manifests: bool = False,
         fake: bool = False,
     ) -> None:
@@ -356,6 +403,10 @@ class VisualBenchmark:
         self.repo_dir = repo_dir
         self.work_root = work_root
         self.root = BenchmarkRoot(work_root / "evidence")
+        self.input_root = Path(
+            input_root
+            or os.environ.get("MAGE_VISUAL_BENCHMARK_INPUT_ROOT", _DEFAULT_INPUT_ROOT)
+        )
         self.compile_manifests = compile_manifests
         self.fake = fake
         self.fingerprint = HostFingerprint.current()
@@ -435,6 +486,18 @@ class VisualBenchmark:
             errors.append(f"{item.prompt_id}/{item.profile}: cfg mismatch")
         if req.get("threads") != self.manifest.threads:
             errors.append(f"{item.prompt_id}/{item.profile}: threads mismatch")
+        rec_runtime = record.get("runtime") or {}
+        if rec_runtime.get("sha256") != RUNTIME_SHA256:
+            errors.append(f"{item.prompt_id}/{item.profile}: runtime sha mismatch")
+        if rec_runtime.get("commit") != RUNTIME_COMMIT:
+            errors.append(f"{item.prompt_id}/{item.profile}: runtime commit mismatch")
+        rec_models = record.get("models") or {}
+        if item.profile == Q8_PROFILE:
+            expected_diff = Q8_DIFFUSION_SHA256
+        else:
+            expected_diff = BF16_DIFFUSION_SHA256
+        if rec_models.get("diffusion", {}).get("sha256") != expected_diff:
+            errors.append(f"{item.prompt_id}/{item.profile}: model identity mismatch")
         img = self.root.image_path(item.prompt_id, item.profile)
         png_sha = record.get("png_sha256")
         if not img.is_file():
@@ -458,21 +521,78 @@ class VisualBenchmark:
     def plan(self) -> dict:
         return plan_to_dict(self.run_plan)
 
-    def _run_single(self, item: RunPlanItem, sd_cli: Path, identity) -> dict:
+    def _prepare_profile_assets(self, profile: str) -> PreparedProfileAssets:
+        from integrations.kaggle.input_adapter import build_kaggle_manifest
+        from integrations.kaggle.profiles import validate_profile_environment
+
+        validate_profile_environment(
+            profile,
+            backend=CPU_BACKEND,
+            mem_total_kb=_mem_total_kb(),
+        )
+
+        meta_dir = self.work_root / ".benchmark-meta" / profile
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        manifest_json_path = meta_dir / "model-manifest.json"
+
+        build_kaggle_manifest(
+            input_root=self.input_root,
+            output=manifest_json_path,
+            profile=profile,
+        )
+
+        model_manifest = load_manifest(
+            manifest_json_path,
+            model_root=self.input_root,
+        )
+
+        verified_paths = verify_manifest(model_manifest)
+
+        if profile == Q8_PROFILE:
+            expected_diff_sha = Q8_DIFFUSION_SHA256
+        else:
+            expected_diff_sha = BF16_DIFFUSION_SHA256
+        if model_manifest.diffusion.sha256 != expected_diff_sha:
+            raise VisualBenchmarkError(
+                f"{profile}: resolved diffusion SHA {model_manifest.diffusion.sha256} "
+                f"does not match expected {expected_diff_sha}"
+            )
+        if model_manifest.text_encoder.sha256 != SHARED_TEXT_ENCODER_SHA256:
+            raise VisualBenchmarkError(
+                f"{profile}: resolved text encoder SHA mismatch"
+            )
+        if model_manifest.vae.sha256 != SHARED_VAE_SHA256:
+            raise VisualBenchmarkError(
+                f"{profile}: resolved VAE SHA mismatch"
+            )
+
+        return PreparedProfileAssets(
+            profile=profile,
+            manifest_path=manifest_json_path,
+            manifest=model_manifest,
+            verified_paths=verified_paths,
+        )
+
+    def _prepare_all_profile_assets(self) -> dict[str, PreparedProfileAssets]:
+        prepared: dict[str, PreparedProfileAssets] = {}
+        for profile in [Q8_PROFILE, BF16_PROFILE]:
+            prepared[profile] = self._prepare_profile_assets(profile)
+        return prepared
+
+    def _run_single(
+        self,
+        item: RunPlanItem,
+        sd_cli: Path,
+        identity,
+        *,
+        prepared_assets: dict[str, PreparedProfileAssets],
+    ) -> dict:
         mem_before = read_mem_available_kb()
         start = time.monotonic()
-        manifest_stub = type(
-            "ManifestStub",
-            (),
-            {
-                "diffusion": type("C", (), {"path": "diffusion-path.gguf"})(),
-                "text_encoder": type("C", (), {"path": "text-encoder-path.gguf"})(),
-                "vae": type("C", (), {"path": "vae-path.safetensors"})(),
-            },
-        )()
+        assets = prepared_assets[item.profile]
         result = run_generation(
             sd_cli,
-            manifest_stub,
+            assets.manifest,
             BackendSpec(backend=CPU_BACKEND),
             prompt=item.prompt,
             seed=item.seed,
@@ -493,7 +613,6 @@ class VisualBenchmark:
         )
         png = self.root.image_path(item.prompt_id, item.profile)
         png.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
         shutil.copyfile(generated, png)
         return {
             "schema_version": SCHEMA_VERSION,
@@ -523,14 +642,17 @@ class VisualBenchmark:
             },
             "models": {
                 "diffusion": {
-                    "sha256": (
-                        Q8_DIFFUSION_SHA256
-                        if item.profile == Q8_PROFILE
-                        else BF16_DIFFUSION_SHA256
-                    ),
+                    "path": str(assets.verified_paths["diffusion"]),
+                    "sha256": assets.manifest.diffusion.sha256,
                 },
-                "text_encoder": {"sha256": SHARED_TEXT_ENCODER_SHA256},
-                "vae": {"sha256": SHARED_VAE_SHA256},
+                "text_encoder": {
+                    "path": str(assets.verified_paths["text_encoder"]),
+                    "sha256": assets.manifest.text_encoder.sha256,
+                },
+                "vae": {
+                    "path": str(assets.verified_paths["vae"]),
+                    "sha256": assets.manifest.vae.sha256,
+                },
             },
             "elapsed_ms": elapsed_ms,
             "memory": {
@@ -549,6 +671,7 @@ class VisualBenchmark:
         self._ensure_fingerprint_file()
         sd_cli = self._resolve_runtime()
         identity = self._verify_runtime(sd_cli)
+        prepared_assets = self._prepare_all_profile_assets()
         records = []
         errors = []
         for item in self.run_plan:
@@ -561,7 +684,9 @@ class VisualBenchmark:
                 records.append(record)
                 continue
             try:
-                record = self._run_single(item, sd_cli, identity)
+                record = self._run_single(
+                    item, sd_cli, identity, prepared_assets=prepared_assets
+                )
             except Exception as exc:
                 record = self._failed_record(item, exc)
                 errors.append(f"{item.prompt_id}/{item.profile}: {exc}")
@@ -699,6 +824,11 @@ class VisualBenchmark:
             return False
         if record.get("png_sha256") and sha256_file(img) != record["png_sha256"]:
             return False
+        rec_runtime = record.get("runtime") or {}
+        if rec_runtime.get("sha256") != RUNTIME_SHA256:
+            return False
+        if rec_runtime.get("commit") != RUNTIME_COMMIT:
+            return False
         return True
 
     def finalize_blind_package(self, output: Path) -> dict:
@@ -767,6 +897,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--repo-dir", default=".")
     parser.add_argument("--work-root", default="/kaggle/working/mageflow-visual-benchmark-768")
+    parser.add_argument("--input-root", default=None)
     parser.add_argument("--fake", action="store_true", help="mock generation (tests only)")
     parser.add_argument("--output", default=None)
     actions = parser.add_mutually_exclusive_group(required=True)
@@ -780,6 +911,7 @@ def main(argv: list[str] | None = None) -> int:
         args.manifest,
         repo_dir=Path(args.repo_dir),
         work_root=Path(args.work_root),
+        input_root=args.input_root,
         fake=args.fake,
     )
     if args.validate_only:
@@ -792,9 +924,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.run:
         bench.validate()
-        if not args.fake:
-            print("RUN requires --fake in this directive; refusing real generation")
-            return 2
         aggregate = bench.run()
         print(json.dumps(aggregate, indent=2))
         return 0
