@@ -768,12 +768,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-dir", default=".")
     parser.add_argument("--work-root", default="/kaggle/working/mageflow-visual-benchmark-768")
     parser.add_argument("--fake", action="store_true", help="mock generation (tests only)")
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("--validate-only")
-    sub.add_parser("--plan")
-    sub.add_parser("--run")
-    parser_finalize = sub.add_parser("--finalize-blind-package")
-    parser_finalize.add_argument("--output", required=True)
+    parser.add_argument("--output", default=None)
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--validate-only", action="store_true")
+    actions.add_argument("--plan", action="store_true")
+    actions.add_argument("--run", action="store_true")
+    actions.add_argument("--finalize-blind-package", action="store_true")
     args = parser.parse_args(argv)
 
     bench = VisualBenchmark(
@@ -782,15 +782,15 @@ def main(argv: list[str] | None = None) -> int:
         work_root=Path(args.work_root),
         fake=args.fake,
     )
-    if args.command == "--validate-only":
+    if args.validate_only:
         bench.validate()
         print("VALIDATE=PASS")
         return 0
-    if args.command == "--plan":
+    if args.plan:
         bench.validate()
         print(json.dumps(bench.plan(), indent=2))
         return 0
-    if args.command == "--run":
+    if args.run:
         bench.validate()
         if not args.fake:
             print("RUN requires --fake in this directive; refusing real generation")
@@ -798,7 +798,10 @@ def main(argv: list[str] | None = None) -> int:
         aggregate = bench.run()
         print(json.dumps(aggregate, indent=2))
         return 0
-    if args.command == "--finalize-blind-package":
+    if args.finalize_blind_package:
+        if not args.output:
+            print("--output required for --finalize-blind-package")
+            return 2
         result = bench.finalize_blind_package(Path(args.output))
         print(json.dumps(result, indent=2))
         return 0
