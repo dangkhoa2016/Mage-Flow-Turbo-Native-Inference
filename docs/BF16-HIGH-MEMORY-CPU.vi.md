@@ -69,3 +69,40 @@ Fail-fast RAM policy được giữ nguyên: RAM hiển thị tối thiểu 27 G
 Gate 512×512 chỉ được chấp nhận khi model/runtime verification PASS, `sd-cli` thoát thành công, PNG hợp lệ, backend được chọn là CPU và minimum available memory quan sát được vẫn từ 3 GiB trở lên.
 
 Chỉ sau khi gate này PASS mới chạy fresh CPU session với cùng matrix 512 → 640 → 768 → 1024 để so sánh trực tiếp Q8 và BF16. Cho tới khi có real BF16 evidence, profile này chỉ là hạ tầng qualification thử nghiệm và không được mô tả là đã release-qualified.
+
+## So sánh cùng máy Q8 và BF16 trên CPU
+
+Để so sánh CPU qualification cùng máy, chạy cả hai matrix trong cùng một session trên cùng một host, cùng `sd-cli` prebuilt, cùng source HEAD, cùng request đóng băng (seed 42, 4 steps, CFG 1.0, 4 threads, prompt fox) và cùng dải resolution 512 → 640 → 768 → 1024. Dùng hai work root sạch riêng biệt và không chạy đồng thời:
+
+```bash
+python -m integrations.kaggle.qualification_matrix \
+  --backend cpu --profile q8-reference \
+  --input-root /kaggle/input \
+  --work-root /kaggle/working/mageflow-q8-matrix-paired \
+  --repo-dir "$PWD"
+```
+
+```bash
+python -m integrations.kaggle.qualification_matrix \
+  --backend cpu --profile bf16-high-memory-cpu \
+  --input-root /kaggle/input \
+  --work-root /kaggle/working/mageflow-bf16-matrix-paired \
+  --repo-dir "$PWD"
+```
+
+Matrix harness chỉ hỗ trợ CPU và từ chối mọi backend không phải `cpu` trước khi resolve model hoặc generation. Cả profile `q8-reference` lẫn `bf16-high-memory-cpu` dùng chung một `sd-cli` CPU prebuilt; không build từ source, không CMake, không biên dịch.
+
+Mỗi profile ghi record theo từng resolution gồm `mem_available_before_run_kb` mới lấy ngay trước generation, `mem_available_after_run_kb` (tuỳ chọn, ghi sau khi child process thoát), `minimum_mem_available_kb`, `peak_sd_cli_rss_kb`, `elapsed_ms` và identity của artifact. Aggregate giữ snapshot `setup.mem_available_before_kb` riêng ở mức matrix.
+
+Sau khi cả hai matrix PASS, so sánh evidence offline mà không chạy inference:
+
+```bash
+python -m integrations.kaggle.compare_matrix_evidence \
+  --q8-aggregate  /kaggle/working/mageflow-q8-matrix-paired/output/qualification-matrix-q8-reference-cpu.json \
+  --bf16-aggregate /kaggle/working/mageflow-bf16-matrix-paired/output/qualification-matrix-bf16-high-memory-cpu-cpu.json \
+  --output /kaggle/working/mageflow-q8-vs-bf16-comparison/comparison-q8-vs-bf16-cpu.json
+```
+
+Utility so sánh xác minh tính có thể so sánh (cùng source HEAD, backend CPU, SHA và commit runtime, dải resolution, prompt, seed, steps, CFG, threads, SHA text encoder và SHA VAE, cùng identity diffusion Q8 và BF16) trước khi tính tỷ lệ elapsed và RSS. Nếu bất kỳ gate nào fail nó báo `COMPARABILITY=FAIL` và không xuất bản tỷ lệ hiệu năng gây hiểu lầm.
+
+Kết quả này chỉ báo cáo **evidence so sánh CPU qualification cùng máy**. Profile BF16 thử nghiệm và profile Q8 reference chỉ được so sánh về latency và bộ nhớ; kết quả không phải release qualification, không khẳng định chất lượng hình ảnh vượt trội, và không được mô tả như bằng chứng yêu cầu tối thiểu 27 GiB cho matrix 1024 đầy đủ.
