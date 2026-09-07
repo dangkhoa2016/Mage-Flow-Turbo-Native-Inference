@@ -414,3 +414,144 @@ def test_q8_reference_contract_remains_unchanged():
     assert profile.diffusion.format == "gguf"
     assert profile.diffusion.quantization == "Q8_0"
     assert profile.allowed_backends == ("cpu", "cuda0")
+
+
+def test_matrix_scope_is_cpu_only():
+    assert qm.CPU_BACKEND == "cpu"
+    assert qm.MATRIX_BACKENDS == ("cpu",)
+
+
+def test_each_resolution_gets_fresh_before_run_memory_sample(matrix_env, monkeypatch):
+    seq = iter(
+        [
+            9_000_000,
+            1000,
+            500_000,
+            2000,
+            600_000,
+            3000,
+            700_000,
+            4000,
+            800_000,
+        ]
+    )
+
+    def fake():
+        return next(seq)
+
+    monkeypatch.setattr(qm, "read_mem_available_kb", fake)
+    code, aggregate = _run(matrix_env)
+    assert code == 0
+    assert aggregate["setup"]["mem_available_before_kb"] == 9_000_000
+    before_runs = [
+        record["memory"]["mem_available_before_run_kb"]
+        for record in aggregate["matrix"]
+    ]
+    assert before_runs == [1000, 2000, 3000, 4000]
+    assert len(set(before_runs)) == 4
+
+
+def test_mem_available_after_run_recorded_per_resolution(matrix_env, monkeypatch):
+    seq = iter(
+        [
+            9_000_000,
+            1000,
+            500_000,
+            2000,
+            600_000,
+            3000,
+            700_000,
+            4000,
+            800_000,
+        ]
+    )
+    monkeypatch.setattr(qm, "read_mem_available_kb", lambda: next(seq))
+    code, aggregate = _run(matrix_env)
+    assert code == 0
+    after_runs = [
+        record["memory"]["mem_available_after_run_kb"]
+        for record in aggregate["matrix"]
+    ]
+    assert after_runs == [500_000, 600_000, 700_000, 800_000]
+
+
+def test_missing_per_run_pre_memory_telemetry_fails_closed(matrix_env, monkeypatch):
+    gen_calls = matrix_env["gen_calls"]
+    gen_calls.clear()
+    seq = iter([9_000_000, 1000, 500_000, None])
+
+    def fake():
+        return next(seq)
+
+    monkeypatch.setattr(qm, "read_mem_available_kb", fake)
+    code, aggregate = _run(matrix_env)
+    assert code != 0
+    assert aggregate["status"] == "failed"
+    assert [call["width"] for call in gen_calls] == [512]
+    assert aggregate["failed_resolution"]["resolution"] == 640
+
+
+def test_matrix_cpu_only_rejects_cuda0_for_q8_before_generation(matrix_env):
+    code, aggregate = qm.run_matrix(
+        input_root=matrix_env["input_root"],
+        work_root=matrix_env["work_root"],
+        backend="cuda0",
+        profile=Q8_REFERENCE_PROFILE,
+        repo_dir=None,
+    )
+    assert code != 0
+    assert aggregate["status"] == "failed"
+    assert aggregate["error"]["phase"] == "setup"
+    assert matrix_env["gen_calls"] == []
+
+
+def test_q8_cpu_matrix_succeeds_with_shared_prebuilt_runtime(matrix_env):
+    code, aggregate = qm.run_matrix(
+        input_root=matrix_env["input_root"],
+        work_root=matrix_env["work_root"],
+        backend="cpu",
+        profile=Q8_REFERENCE_PROFILE,
+        repo_dir=None,
+    )
+    assert code == 0
+    assert aggregate["status"] == "passed"
+    assert aggregate["completed_resolutions"] == [512, 640, 768, 1024]
+
+
+def test_q8_matrix_allowed_on_low_ram_host_without_bf16_gates(
+    matrix_env, monkeypatch
+):
+    monkeypatch.setattr(qm, "_mem_total_kb", lambda: 16 * 1024 * 1024)
+    code, aggregate = qm.run_matrix(
+        input_root=matrix_env["input_root"],
+        work_root=matrix_env["work_root"],
+        backend="cpu",
+        profile=Q8_REFERENCE_PROFILE,
+        repo_dir=None,
+    )
+    assert code == 0
+    assert aggregate["status"] == "passed"
+
+
+def test_q8_runtime_sha_mismatch_fails_before_generation(monkeypatch, tmp_path):
+    cli = _write_executable(tmp_path)
+    monkeypatch.setenv("MAGE_CPU_PREBUILT_SD_CLI", str(cli))
+    monkeypatch.setattr(qm, "BF16_CPU_RUNTIME_SHA256", "0" * 64)
+    _patch_mem_total(monkeypatch)
+    manifest = _fake_manifest(tmp_path)
+    _patch_manifest_build(monkeypatch, manifest, [])
+    _patch_manifest_verify(monkeypatch, manifest, [])
+    _patch_runtime_manager(monkeypatch)
+    gen_calls: list = []
+    _patch_run_generation(monkeypatch, gen_calls)
+    code, aggregate = qm.run_matrix(
+        input_root=tmp_path / "input",
+        work_root=tmp_path / "work",
+        backend="cpu",
+        profile=Q8_REFERENCE_PROFILE,
+        repo_dir=None,
+    )
+    assert code != 0
+    assert aggregate["status"] == "failed"
+    assert "mismatch" in aggregate["error"]["message"]
+    assert gen_calls == []
