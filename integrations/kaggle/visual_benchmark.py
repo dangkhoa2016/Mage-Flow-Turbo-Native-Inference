@@ -322,6 +322,13 @@ class RunPlanItem:
     seed: int
 
 
+@dataclass(frozen=True)
+class AttemptSpec:
+    attempt_id: str
+    run_dir: Path
+    previous_attempts: list[str]
+
+
 def build_run_plan(manifest: Manifest) -> list[RunPlanItem]:
     plan: list[RunPlanItem] = []
     index = 0
@@ -549,6 +556,16 @@ class VisualBenchmark:
                     errors.append(f"{tag}: PNG sha mismatch")
             except OSError:
                 errors.append(f"{tag}: canonical PNG unreadable")
+        attempt = record.get("attempt")
+        if not isinstance(attempt, dict):
+            errors.append(f"{tag}: attempt metadata missing")
+        else:
+            if not isinstance(attempt.get("attempt_id"), str) or not attempt.get("attempt_id"):
+                errors.append(f"{tag}: attempt_id invalid")
+            if not isinstance(attempt.get("run_dir"), str) or not attempt.get("run_dir"):
+                errors.append(f"{tag}: attempt run_dir invalid")
+            if not isinstance(attempt.get("previous_attempts"), list):
+                errors.append(f"{tag}: attempt previous_attempts invalid")
         return errors
 
     def _is_resume_safe(self, item: RunPlanItem) -> bool:
@@ -622,6 +639,26 @@ class VisualBenchmark:
             prepared[profile] = self._prepare_profile_assets(profile)
         return prepared
 
+    def _next_attempt(self, item: RunPlanItem) -> AttemptSpec:
+        prefix = f"vis-{item.prompt_id}-{item.profile}-attempt-"
+        runs_dir = self.work_root / ".runs"
+        existing: list[str] = []
+        used: set[str] = set()
+        if runs_dir.is_dir():
+            for entry in runs_dir.iterdir():
+                if entry.is_dir() and entry.name.startswith(prefix):
+                    existing.append(entry.name)
+                    used.add(entry.name)
+        seq = 1
+        while f"{prefix}{seq:03d}" in used:
+            seq += 1
+        attempt_id = f"{prefix}{seq:03d}"
+        return AttemptSpec(
+            attempt_id=attempt_id,
+            run_dir=runs_dir / attempt_id,
+            previous_attempts=sorted(existing),
+        )
+
     def _run_single(
         self,
         item: RunPlanItem,
@@ -629,7 +666,10 @@ class VisualBenchmark:
         identity,
         *,
         prepared_assets: dict[str, PreparedProfileAssets],
+        attempt: AttemptSpec | None = None,
     ) -> dict:
+        if attempt is None:
+            attempt = self._next_attempt(item)
         mem_before = read_mem_available_kb()
         start = time.monotonic()
         assets = prepared_assets[item.profile]
@@ -646,9 +686,15 @@ class VisualBenchmark:
             threads=self.manifest.threads,
             output_dir=self.root.images_dir / item.prompt_id,
             runs_dir=self.work_root / ".runs",
-            client_request_id=f"vis-{item.prompt_id}-{item.profile}",
+            client_request_id=attempt.attempt_id,
             fake=self.fake,
         )
+        if result.request_id != attempt.attempt_id:
+            raise VisualBenchmarkError(
+                f"{item.prompt_id}/{item.profile}: runner request_id "
+                f"{result.request_id} != allocated attempt {attempt.attempt_id}"
+            )
+        physical_run_dir = self.work_root / ".runs" / result.request_id
         elapsed_ms = int((time.monotonic() - start) * 1000)
         mem_after = read_mem_available_kb()
         generated = (
@@ -697,6 +743,11 @@ class VisualBenchmark:
                     "sha256": assets.manifest.vae.sha256,
                 },
             },
+            "attempt": {
+                "attempt_id": result.request_id,
+                "run_dir": str(physical_run_dir),
+                "previous_attempts": attempt.previous_attempts,
+            },
             "elapsed_ms": elapsed_ms,
             "memory": {
                 "mem_available_before_run_kb": mem_before,
@@ -726,12 +777,17 @@ class VisualBenchmark:
                 )
                 records.append(record)
                 continue
+            attempt = self._next_attempt(item)
             try:
                 record = self._run_single(
-                    item, sd_cli, identity, prepared_assets=prepared_assets
+                    item,
+                    sd_cli,
+                    identity,
+                    prepared_assets=prepared_assets,
+                    attempt=attempt,
                 )
             except Exception as exc:
-                record = self._failed_record(item, exc)
+                record = self._failed_record(item, exc, attempt=attempt)
                 errors.append(f"{item.prompt_id}/{item.profile}: {exc}")
             atomic_write_json(
                 self.root.record_path(item.prompt_id, item.profile), record
@@ -741,7 +797,13 @@ class VisualBenchmark:
         atomic_write_json(self.root.root / "aggregate.json", aggregate)
         return aggregate
 
-    def _failed_record(self, item: RunPlanItem, exc: Exception) -> dict:
+    def _failed_record(
+        self,
+        item: RunPlanItem,
+        exc: Exception,
+        *,
+        attempt: AttemptSpec | None = None,
+    ) -> dict:
         record = {
             "schema_version": SCHEMA_VERSION,
             "benchmark_id": self.manifest.benchmark_id,
@@ -765,6 +827,12 @@ class VisualBenchmark:
             "status": "failed",
             "error": str(exc),
         }
+        if attempt is not None:
+            record["attempt"] = {
+                "attempt_id": attempt.attempt_id,
+                "run_dir": str(attempt.run_dir),
+                "previous_attempts": attempt.previous_attempts,
+            }
         return record
 
     def _ensure_fingerprint_file(self) -> None:

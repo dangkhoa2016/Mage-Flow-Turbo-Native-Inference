@@ -936,5 +936,100 @@ def test_AGGREGATE_rejects_tampered_request_seed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# contract hardening 4 — retry attempt isolation regression (added later)
+# contract hardening 4 — retry attempt isolation regression
 # ---------------------------------------------------------------------------
+
+
+def _retry_prepared_assets(tmp_path):
+    return {
+        vb.Q8_PROFILE: _make_prepared(vb.Q8_PROFILE, tmp_path),
+        vb.BF16_PROFILE: _make_prepared(vb.BF16_PROFILE, tmp_path),
+    }
+
+
+def test_RETRY_failed_attempt_then_new_run_dir_succeeds(tmp_path, monkeypatch):
+    from mageflow_native.inference.runner import GenerationResult, ArtifactInfo
+
+    bench = _make_harness(tmp_path)
+    monkeypatch.setattr(vb, "_source_head", lambda repo_dir: HEAD)
+    monkeypatch.setattr(
+        bench,
+        "_resolve_runtime",
+        lambda: (tmp_path / "work" / ".runs-mock"),
+    )
+    monkeypatch.setattr(bench, "_verify_runtime", lambda p: _FakeRuntime(p))
+    monkeypatch.setattr(
+        bench,
+        "_prepare_all_profile_assets",
+        lambda: _retry_prepared_assets(tmp_path),
+    )
+
+    target = next(
+        i for i in bench.run_plan
+        if i.prompt_id == "P05" and i.profile == vb.Q8_PROFILE
+    )
+    target_prefix = f"vis-{target.prompt_id}-{target.profile}"
+    real_run_gen = vb.run_generation
+    fail_state = {"count": 0}
+
+    def flaky_gen(sd_cli, manifest, backend_spec, **kw):
+        request_id = kw["client_request_id"]
+        runs_dir = Path(kw["runs_dir"])
+        if not request_id.startswith(target_prefix):
+            return real_run_gen(sd_cli, manifest, backend_spec, **kw)
+        run_dir = runs_dir / request_id
+        if run_dir.exists():
+            raise FileExistsError(f"run dir already exists: {run_dir}")
+        run_dir.mkdir(parents=True, exist_ok=False)
+        if fail_state["count"] == 0:
+            fail_state["count"] += 1
+            raise RuntimeError("boom: first attempt failed")
+        fail_state["count"] += 1
+        out_dir = Path(kw["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{request_id}.png"
+        out_path.write_bytes(b"FAKEPNG")
+        return GenerationResult(
+            request_id=request_id, seed=kw["seed"], exit_code=0, elapsed_ms=10,
+            peak_sd_cli_rss_kb=100, minimum_mem_available_kb=100,
+            gpu_peak_mib=None,
+            artifact=ArtifactInfo(
+                filename=out_path.name, bytes=out_path.stat().st_size,
+                sha256="aa", width=1, height=1,
+            ),
+            stdout_path="", stderr_path="",
+        )
+
+    monkeypatch.setattr(vb, "run_generation", flaky_gen)
+
+    # First run: target attempt-001 fails; other 19 items pass.
+    with pytest.raises(vb.VisualBenchmarkError, match="incomplete pairs"):
+        bench.run()
+
+    attempt_001_name = f"vis-{target.prompt_id}-{target.profile}-attempt-001"
+    run_dir_001 = tmp_path / "work" / ".runs" / attempt_001_name
+    assert run_dir_001.is_dir(), "attempt-001 physical run dir must exist"
+
+    failed_rec = json.loads(
+        bench.root.record_path(target.prompt_id, target.profile).read_text()
+    )
+    assert failed_rec["status"] == "failed"
+    assert failed_rec["attempt"]["attempt_id"] == attempt_001_name
+
+    # Second run: retry must allocate attempt-002 and succeed.
+    agg = bench.run()
+    assert agg["total_pairs"] == 10
+
+    passed_rec = json.loads(
+        bench.root.record_path(target.prompt_id, target.profile).read_text()
+    )
+    assert passed_rec["status"] == "passed"
+    attempt = passed_rec["attempt"]
+    assert attempt["attempt_id"] == (
+        f"vis-{target.prompt_id}-{target.profile}-attempt-002"
+    )
+    assert attempt_001_name in attempt["previous_attempts"]
+    assert attempt["run_dir"] != str(run_dir_001)
+    assert run_dir_001.is_dir(), "attempt-001 directory must be preserved"
+    attempt_002_dir = tmp_path / "work" / ".runs" / attempt["attempt_id"]
+    assert attempt_002_dir.is_dir(), "retry must create a distinct physical run dir"
