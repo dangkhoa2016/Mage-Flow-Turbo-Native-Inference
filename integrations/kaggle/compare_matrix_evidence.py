@@ -7,6 +7,7 @@ from pathlib import Path
 Q8_PROFILE = "q8-reference"
 BF16_PROFILE = "bf16-high-memory-cpu"
 CSS_BACKEND = "cpu"
+REQUEST_FIELDS = ("prompt", "seed", "steps", "cfg", "threads")
 
 Q8_DIFFUSION_SHA256 = "4c3dafc143ee64121692b6b63563a4f5288bf6183c4870e1d65f1566519ba7f0"
 BF16_DIFFUSION_SHA256 = "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d"
@@ -32,7 +33,40 @@ def _verify_memory_record(record: dict) -> None:
         raise ValueError("minimum memory available telemetry is missing")
 
 
-def check_comparability(q8: dict, bf16: dict) -> list[str]:
+def _extract_canonical_request(data: dict, label: str) -> tuple[dict | None, list[str]]:
+    errors: list[str] = []
+    matrix = data.get("matrix") or []
+    if not matrix:
+        errors.append(f"{label}: no matrix records")
+        return None, errors
+
+    canonical: dict | None = None
+    for record in matrix:
+        req = record.get("request")
+        if not isinstance(req, dict):
+            errors.append(f"{label}: missing or invalid request in matrix record")
+            return None, errors
+        normalized = {f: req.get(f) for f in REQUEST_FIELDS}
+        if any(v is None for v in normalized.values()):
+            errors.append(
+                f"{label}: incomplete request evidence in matrix record, "
+                f"fields={REQUEST_FIELDS}"
+            )
+            return None, errors
+        if canonical is None:
+            canonical = normalized
+        elif normalized != canonical:
+            errors.append(
+                f"{label}: inconsistent request evidence across matrix records"
+            )
+            return None, errors
+
+    if canonical is None:
+        errors.append(f"{label}: no valid request evidence found")
+    return canonical, errors
+
+
+def check_comparability(q8: dict, bf16: dict) -> tuple[list[str], dict | None, dict | None]:
     errors: list[str] = []
 
     if q8.get("source_head") != bf16.get("source_head"):
@@ -60,13 +94,14 @@ def check_comparability(q8: dict, bf16: dict) -> list[str]:
             f"resolution list mismatch: q8={q8_res} bf16={bf16_res}"
         )
 
-    def _request_key(data: dict) -> tuple:
-        req = data.get("request") or {}
-        return (req.get("prompt"), req.get("seed"), req.get("steps"),
-                req.get("cfg"), req.get("threads"))
+    q8_canonical, q8_req_errors = _extract_canonical_request(q8, "q8")
+    errors.extend(q8_req_errors)
+    bf16_canonical, bf16_req_errors = _extract_canonical_request(bf16, "bf16")
+    errors.extend(bf16_req_errors)
 
-    if _request_key(q8) != _request_key(bf16):
-        errors.append("request params mismatch")
+    if q8_canonical is not None and bf16_canonical is not None:
+        if q8_canonical != bf16_canonical:
+            errors.append("request params mismatch (cross-profile)")
 
     q8_models = q8.get("models") or {}
     bf16_models = bf16.get("models") or {}
@@ -89,7 +124,7 @@ def check_comparability(q8: dict, bf16: dict) -> list[str]:
     if q8.get("status") != "passed" or bf16.get("status") != "passed":
         errors.append("matrix status must be passed for both profiles")
 
-    return errors
+    return errors, q8_canonical, bf16_canonical
 
 
 def _records_by_resolution(data: dict) -> dict[int, dict]:
@@ -180,7 +215,7 @@ def build_comparison(
     if q8_profile != Q8_PROFILE or bf16_profile != BF16_PROFILE:
         raise ValueError("profiles must be q8-reference and bf16-high-memory-cpu")
 
-    errors = check_comparability(q8, bf16)
+    errors, q8_canonical, bf16_canonical = check_comparability(q8, bf16)
     if errors:
         return {
             "status": "failed",
@@ -188,6 +223,7 @@ def build_comparison(
             "errors": errors,
         }
 
+    canonical_request = q8_canonical
     metrics = compute_comparison(q8, bf16)
     return {
         "status": "passed",
@@ -195,7 +231,7 @@ def build_comparison(
         "source_head": q8.get("source_head"),
         "backend": CSS_BACKEND,
         "runtime": q8.get("runtime"),
-        "request": q8.get("request"),
+        "request": canonical_request,
         "resolutions": q8.get("matrix_resolutions"),
         "q8": q8,
         "bf16": bf16,

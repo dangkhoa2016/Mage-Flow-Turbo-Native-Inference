@@ -134,3 +134,92 @@ def test_missing_per_run_pre_memory_fails_closed(tmp_path):
     bf16p.write_text(json.dumps(bf16), encoding="utf-8")
     with pytest.raises(ValueError, match="pre-memory"):
         cmp.build_comparison(q8p, bf16p)
+
+
+EXPECTED_REQUEST = {
+    "prompt": "a fox",
+    "seed": 42,
+    "steps": 4,
+    "cfg": 1.0,
+    "threads": 4,
+}
+
+
+def _aggregate_with_requests(profile, *, dit_sha, elapsed, source_head=HEAD,
+                             request=None):
+    if request is None:
+        request = EXPECTED_REQUEST
+    agg = _aggregate(profile, dit_sha=dit_sha, elapsed=elapsed,
+                     source_head=source_head)
+    agg["matrix"] = [
+        {**rec, "request": dict(request)}
+        for rec in agg["matrix"]
+    ]
+    return agg
+
+
+def test_B1_canonical_request_propagated_from_records(tmp_path):
+    q8 = _aggregate_with_requests(cmp.Q8_PROFILE, dit_sha=cmp.Q8_DIFFUSION_SHA256,
+                                  elapsed=[10, 20, 30, 40])
+    bf16 = _aggregate_with_requests(cmp.BF16_PROFILE, dit_sha=cmp.BF16_DIFFUSION_SHA256,
+                                    elapsed=[20, 40, 60, 80])
+    q8p = tmp_path / "q8.json"
+    bf16p = tmp_path / "bf16.json"
+    q8p.write_text(json.dumps(q8), encoding="utf-8")
+    bf16p.write_text(json.dumps(bf16), encoding="utf-8")
+
+    result = cmp.build_comparison(q8p, bf16p)
+    assert result["status"] == "passed"
+    assert result["comparability"] == "passed"
+    assert result["request"] is not None
+    assert result["request"] == EXPECTED_REQUEST
+
+
+def test_B2_cross_profile_request_mismatch_fails_closed(tmp_path):
+    q8 = _aggregate_with_requests(cmp.Q8_PROFILE, dit_sha=cmp.Q8_DIFFUSION_SHA256,
+                                  elapsed=[10, 20, 30, 40])
+    bf16 = _aggregate_with_requests(cmp.BF16_PROFILE, dit_sha=cmp.BF16_DIFFUSION_SHA256,
+                                    elapsed=[20, 40, 60, 80])
+    bf16["matrix"][2]["request"]["seed"] = 43
+    q8p = tmp_path / "q8.json"
+    bf16p = tmp_path / "bf16.json"
+    q8p.write_text(json.dumps(q8), encoding="utf-8")
+    bf16p.write_text(json.dumps(bf16), encoding="utf-8")
+
+    result = cmp.build_comparison(q8p, bf16p)
+    assert result["status"] == "failed"
+    assert result["comparability"] == "failed"
+    assert "comparison" not in result
+    assert "aggregate" not in result
+
+
+def test_B3_internal_inconsistency_fails_closed(tmp_path):
+    q8 = _aggregate_with_requests(cmp.Q8_PROFILE, dit_sha=cmp.Q8_DIFFUSION_SHA256,
+                                  elapsed=[10, 20, 30, 40])
+    q8["matrix"][1]["request"]["cfg"] = 2.0
+    bf16 = _aggregate_with_requests(cmp.BF16_PROFILE, dit_sha=cmp.BF16_DIFFUSION_SHA256,
+                                    elapsed=[20, 40, 60, 80])
+    q8p = tmp_path / "q8.json"
+    bf16p = tmp_path / "bf16.json"
+    q8p.write_text(json.dumps(q8), encoding="utf-8")
+    bf16p.write_text(json.dumps(bf16), encoding="utf-8")
+
+    result = cmp.build_comparison(q8p, bf16p)
+    assert result["comparability"] == "failed"
+    assert result["status"] == "failed"
+
+
+def test_B4_missing_request_evidence_fails_closed(tmp_path):
+    q8 = _aggregate_with_requests(cmp.Q8_PROFILE, dit_sha=cmp.Q8_DIFFUSION_SHA256,
+                                  elapsed=[10, 20, 30, 40])
+    bf16 = _aggregate_with_requests(cmp.BF16_PROFILE, dit_sha=cmp.BF16_DIFFUSION_SHA256,
+                                    elapsed=[20, 40, 60, 80])
+    bf16["matrix"][0]["request"] = None
+    q8p = tmp_path / "q8.json"
+    bf16p = tmp_path / "bf16.json"
+    q8p.write_text(json.dumps(q8), encoding="utf-8")
+    bf16p.write_text(json.dumps(bf16), encoding="utf-8")
+
+    result = cmp.build_comparison(q8p, bf16p)
+    assert result["comparability"] == "failed"
+    assert result["status"] == "failed"
