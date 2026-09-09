@@ -7,67 +7,100 @@
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](README.vi.md)
 
-A **portable native inference and deployment stack for Mage-Flow-Turbo**. The project does not train or modify model weights. Python provides configuration, validation, CLI/REST orchestration, lifecycle control and evidence collection; model inference is executed by the native `stable-diffusion.cpp` `sd-cli` runtime.
+A **portable native inference and deployment stack for Mage-Flow-Turbo**. The repository does not train or modify model weights. Python provides configuration, model/runtime identity verification, CLI/REST orchestration, lifecycle control, telemetry and evidence collection; the actual model execution path is the native `stable-diffusion.cpp` `sd-cli` runtime.
 
-```text
-manifest → SHA-256 verification → pinned sd-cli runtime
-        → Mage-Flow-Turbo DiT Q8_0
-        → Qwen3-VL-4B text encoder Q4_K_M
-        → dedicated VAE
-        → Linux CPU or NVIDIA CUDA cuda0
-        → PNG artifact + structured evidence
-```
+The project name describes the execution stack, not a single quantization or serialization format. v1.0.0 supports a canonical Q8 GGUF profile and a BF16 SafeTensors profile, both through the same native runtime.
 
-## Exact reference stack
+## v1.0.0 model profiles
 
-| Role | Exact artifact | Format / quantization |
+| Profile | Mage-Flow diffusion | Text encoder | VAE | Native runtime | CPU | CUDA `cuda0` | Role |
+|---|---|---|---|---|---:|---:|---|
+| `q8-reference` | GGUF `Q8_0` | Qwen3-VL-4B GGUF `Q4_K_M` | SafeTensors | pinned `stable-diffusion.cpp` `sd-cli` | yes | yes | canonical/default |
+| `bf16-safetensors` | BF16 SafeTensors | Qwen3-VL-4B GGUF `Q4_K_M` | SafeTensors | pinned `stable-diffusion.cpp` `sd-cli` | yes | yes | supported alternative |
+
+The project does **not** provide a Hugging Face Transformers inference backend and does **not** run a PyTorch/Transformers inference loop. `PyTorch/Transformers` wording in provenance or model-mirror paths refers to the source artifact/distribution layout of the BF16 SafeTensors weights, not the execution framework.
+
+The project is also intentionally not described as GGUF-only: even the canonical Q8 profile uses a SafeTensors VAE.
+
+## Frozen model/runtime identities
+
+| Role | Artifact / identity | Format |
 |---|---|---|
-| Diffusion model | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 |
+| Q8 diffusion | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 |
+| BF16 diffusion | `diffusion_pytorch_model.safetensors` from Mage-Flow `PyTorch / default` | BF16 SafeTensors |
 | Text encoder | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | GGUF Q4_K_M |
 | VAE | `diffusion_pytorch_model.safetensors` | SafeTensors |
 | Native runtime | `stable-diffusion.cpp` `sd-cli` | pinned commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
 
-Frozen SHA-256 identities are enforced before real inference. The repository contains no model weights.
+Exact SHA-256 identities are verified before real inference. The Git repository contains no model weights.
 
-## v1.0.0 qualification scope
+## Strict 2×2 v1.0.0 qualification matrix
 
-| Environment | Backend | Qualification role |
-|---|---|---|
-| Linux x86-64 | CPU | required release target |
-| Linux + NVIDIA GPU | CUDA `cuda0` | required release target |
-| Kaggle Accelerator=None | auto-selected CPU | production/evidence integration target |
-| Kaggle NVIDIA T4/T4x2 | auto-selected CUDA `cuda0` on physical GPU 0 | production/evidence integration target |
+The first public release is qualified across four fresh cells:
 
-The public Kaggle production notebook is **prebuilt-runtime only**: Accelerator=None selects CPU; T4/T4x2 selects CUDA0 slot 0; P100, TPU and other unsupported accelerators fail closed. There is no CPU fallback from an attached unsupported GPU and no source-build fallback.
+| Profile | Kaggle CPU | Kaggle T4/T4x2 `cuda0` |
+|---|---:|---:|
+| `q8-reference` | fresh exact-head matrix | fresh exact-head matrix |
+| `bf16-safetensors` | fresh exact-head matrix | fresh exact-head matrix |
 
-## Canonical fresh CPU ↔ T4 benchmark
+Every cell uses the same frozen source HEAD/TREE and the same canonical protocol:
 
-Both authoritative evidence sessions used the same notebook source, source HEAD, model inputs, prompt, seed, steps, CFG, threads and matrix order.
+```text
+prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
+seed    = 42
+steps   = 4
+CFG     = 1.0
+threads = 4
+matrix  = 512 → 640 → 768 → 1024
+```
 
-| Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 512×512 | 215.816 s | 7.590 s | **28.43×** | 238.072 s | 27.209 s | **8.75×** | 7,930 MiB |
-| 640×640 | 338.014 s | 8.698 s | **38.86×** | 363.299 s | 29.040 s | **12.51×** | 8,356 MiB |
-| 768×768 | 491.700 s | 9.710 s | **50.64×** | 513.961 s | 30.072 s | **17.09×** | 8,702 MiB |
-| 1024×1024 | 939.371 s | 12.420 s | **75.63×** | 962.737 s | 33.047 s | **29.13×** | 9,316 MiB |
+Each resolution is generated exactly once per authority session. The matrix is sequential and fail-fast. If a genuine later-resolution platform/runtime limit occurs, evidence records it rather than silently changing placement or inventing a ratio.
 
-**Headline:** at 1024×1024, T4 native generation completed in **12.420 s** versus **939.371 s** on CPU — a **75.63×** same-resolution native-generation speedup.
+### CPU policy
 
-See [the complete benchmark evidence](docs/BENCHMARKS-v1.0.0.md) for notebook/runtime hashes, methodology and interpretation rules.
+- Kaggle `Accelerator=None`;
+- backend exactly `cpu`;
+- prebuilt CPU `sd-cli` only;
+- no CUDA fallback;
+- host-memory and process-RSS telemetry;
+- the BF16 CPU profile retains its explicit high-memory/headroom safety gates.
+
+### T4/T4x2 policy
+
+- host must be T4 or T4x2;
+- release qualification uses only physical GPU slot 0;
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID`;
+- `CUDA_VISIBLE_DEVICES=0`;
+- effective inference backend `cuda0`;
+- no `cuda1`, no multi-GPU split, no `auto-fit`, no CPU inference fallback;
+- prebuilt CUDA runtime only;
+- successful CUDA generations require positive VRAM telemetry.
+
+A T4x2 host is therefore allowed as a host configuration, but v1.0.0 qualification remains a strict single-T4 benchmark.
+
+## Fresh benchmark publication policy
+
+Fresh strict 2×2 measurements are generated **after the final source freeze**. The frozen comparator verifies source HEAD/TREE, canonical request, model identities, runtime commit and backend-specific runtime SHA values before calculating ratios. A frozen renderer then produces the release-facing Markdown table.
+
+The final measured numbers are published as checksum-protected GitHub Release assets/body rather than pasted back into source after qualification. This avoids invalidating exact-head evidence by editing README after the benchmark has run.
+
+See [the benchmark contract](docs/BENCHMARKS-v1.0.0.md).
 
 ## Why native inference?
 
-The diffusion step, text conditioning and VAE decoding are executed by `sd-cli`; there is no PyTorch/Transformers inference loop in the project. Python validates model identity, builds explicit subprocess arguments with `shell=False`, monitors the native process and records evidence.
+Diffusion execution, text conditioning and VAE decoding are performed by `sd-cli`. Python validates identities, constructs explicit subprocess arguments with `shell=False`, monitors the native process, validates PNG artifacts and records structured evidence.
 
-## Verify the model stack
+This architecture gives both model profiles one common runtime path, which makes the Q8/BF16 × CPU/CUDA comparison substantially easier to audit.
+
+## Verify the Q8 reference stack
 
 ```bash
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-## Local Linux CPU
+## Local Linux development
 
-The generic CLI still supports building a local runtime when deliberately developing outside the production Kaggle notebook:
+The generic CLI may build a local runtime when deliberately developing outside release qualification:
 
 ```bash
 python -m pip install -e .
@@ -76,7 +109,9 @@ mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-## NVIDIA CUDA
+Release qualification itself is **prebuilt-runtime only**.
+
+## NVIDIA CUDA development
 
 ```bash
 python -m pip install -e .
@@ -84,7 +119,7 @@ mageflow-native runtime build --backend cuda
 mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json --backend cuda0
 ```
 
-Release qualification uses deterministic placement (`cpu` or `cuda0`), never inference auto-splitting.
+Release qualification uses deterministic `cuda0` placement rather than automatic splitting.
 
 ## REST API
 
@@ -100,49 +135,39 @@ GET  /v1/artifacts/<png>
 
 ## Kaggle integration
 
-The public notebook [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) automatically detects the supported Kaggle accelerator. Public defaults are `RUN_MODE="experiment"` and `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainers can opt into one-shot `evidence` mode for the frozen `512 → 640 → 768 → 1024` matrix. See [docs/kaggle.md](docs/kaggle.md).
+The public notebook [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) detects supported Kaggle accelerators. For release qualification, use the dedicated matrix harness and exact prebuilt runtime/profile inputs rather than relying on notebook defaults. See [docs/kaggle.md](docs/kaggle.md).
 
-### Kaggle model-attachment policy
+### Model-attachment policy
 
-For normal Kaggle inference, attach only the Mage-Flow-Turbo diffusion family required by the selected profile.
+For a normal qualification/inference session, attach exactly one Mage-Flow-Turbo diffusion family:
 
-- `q8-reference` — attach the Mage-Flow GGUF `q8-0` diffusion assets. The shared Qwen GGUF text encoder and VAE-only SafeTensors remain normal parts of this profile.
-- `bf16-high-memory-cpu` — attach the Mage-Flow PyTorch/Transformers SafeTensors `default` assets for the BF16 transformer/VAE, plus the shared Qwen text encoder.
+- `q8-reference` — Mage-Flow `GGUF / q8-0`, shared Qwen GGUF and VAE-only SafeTensors;
+- `bf16-safetensors` — Mage-Flow `PyTorch / default` BF16 transformer/VAE plus the shared Qwen GGUF text encoder.
 
-Do not attach both the Mage-Flow `GGUF / q8-0` diffusion family and the Mage-Flow `PyTorch / default` diffusion family in an ordinary Kaggle session.
+Do not attach both Mage diffusion families in an ordinary authority session. Mixed-family attachment is reserved for explicitly controlled research tooling and is not part of the four fresh release qualification cells.
 
-Attaching files does not necessarily load every model fully into RAM immediately, but mixed families increase input footprint, discovery/hash overhead, and the risk of accidentally loading or memory-mapping both variants. On memory-constrained Kaggle sessions this can cause severe memory pressure or misleading performance measurements.
+## Historical BF16 CPU visual research
 
-The exception is controlled benchmarking/comparison. The repository's visual benchmark explicitly allows both frozen diffusion families, verifies their exact identities, and executes them sequentially for reproducible A/B evaluation.
+Before the strict 2×2 release redesign, a same-host paired 768×768 CPU visual study compared the Q8 and BF16 representations. That historical study remains useful as quality-oriented research, but it is not the final v1.0.0 2×2 performance authority and does not determine the default profile. Q8 remains the canonical/default profile.
 
-For normal use: **one selected profile per Kaggle session**.
-
-The BF16 profile remains a supported, opt-in, high-memory / quality-oriented experimental profile; Q8 remains the default/canonical profile.
-
-### BF16 CPU evidence
-
-A completed same-host paired 768×768 visual benchmark on 4 CPU threads gives:
-
-| Tested CPU profile | Mean / image | Peak `sd-cli` RSS | Current role |
-|---|---:|---:|---|
-| `q8-reference` | ~10.67 min | ~8.89 GB | canonical/default |
-| `bf16-high-memory-cpu` | ~16.90 min | ~12.54 GB | supported opt-in experimental |
-
-In the completed 10-pair blind 768×768 comparison, BF16 won 4 prompts, Q8 won 3 and 3 tied; only one BF16 win was materially clear. Therefore BF16 remains available for quality-oriented experimentation, but current evidence does not justify replacing Q8 as the default. See [docs/BF16-HIGH-MEMORY-CPU.md](docs/BF16-HIGH-MEMORY-CPU.md).
+See [BF16 SafeTensors background and qualification policy](docs/BF16-HIGH-MEMORY-CPU.md).
 
 ## Reproducibility and evidence
 
-The canonical request is:
+CPU and CUDA outputs may legitimately differ byte-for-byte across numerical backends. Release evidence records:
 
-```text
-prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
-seed    = 42
-steps   = 4
-CFG     = 1.0
-threads = 4
-```
+- exact source HEAD and TREE;
+- profile/backend identity;
+- model component names/formats/SHA-256 values;
+- pinned native runtime commit and binary SHA-256;
+- canonical request and resolution;
+- elapsed time;
+- host memory / process RSS;
+- CUDA peak VRAM when applicable;
+- PNG filename, dimensions, byte count and SHA-256;
+- explicit failure classification when a matrix stops.
 
-CPU and CUDA outputs may legitimately differ byte-for-byte across numerical backends. Evidence records exact source/runtime/model identity, backend, prompt, dimensions, timing class, memory telemetry and PNG SHA-256.
+Evidence archives are checksum-protected, contain internal manifests, and reject model weights and known secret patterns.
 
 ## Documentation
 
@@ -151,7 +176,8 @@ CPU and CUDA outputs may legitimately differ byte-for-byte across numerical back
 - [Local Linux](docs/local-linux.md)
 - [CUDA](docs/cuda.md)
 - [Kaggle](docs/kaggle.md)
-- [Canonical benchmarks](docs/BENCHMARKS-v1.0.0.md)
+- [Strict v1.0.0 benchmark contract](docs/BENCHMARKS-v1.0.0.md)
+- [BF16 SafeTensors profile](docs/BF16-HIGH-MEMORY-CPU.md)
 - [REST API](docs/REST-API.md)
 - [Testing](docs/TESTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
