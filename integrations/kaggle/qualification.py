@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 from pathlib import Path
 
 from mageflow_native.constants import (
@@ -15,7 +14,7 @@ from mageflow_native.constants import (
     CANONICAL_THREADS,
     CANONICAL_WIDTH,
 )
-from mageflow_native.models.manifest import load_manifest, verify_manifest
+from mageflow_native.models.manifest import load_manifest, sha256_file, verify_manifest
 from mageflow_native.runtime.manager import RuntimeManager
 from mageflow_native.runtime.spec import BackendSpec
 from mageflow_native.telemetry import read_mem_available_kb
@@ -26,23 +25,13 @@ from integrations.kaggle.profiles import (
     validate_profile_environment,
     validate_profile_result,
 )
+from integrations.kaggle.qualification_matrix import (
+    _source_identity,
+    _validate_cuda_session_policy,
+    _validate_runtime_cuda_devices,
+    runtime_spec_for_backend,
+)
 from integrations.kaggle.runtime_adapter import kaggle_cache_root, runtime_hint
-
-
-def _source_head(repo_dir: Path) -> str:
-    try:
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(repo_dir),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            .stdout.strip()
-        )
-    except Exception:
-        return "unknown"
 
 
 def _mem_total_kb() -> int:
@@ -59,6 +48,7 @@ def run_qualification(
     profile: str = Q8_REFERENCE_PROFILE,
     repo_dir: Path | None = None,
 ) -> dict:
+    physical_gpus = _validate_cuda_session_policy(backend)
     mem_total_kb = _mem_total_kb()
     mem_available_before_kb = read_mem_available_kb()
     selected_profile = validate_profile_environment(
@@ -77,17 +67,21 @@ def run_qualification(
 
     sd_cli_hint = runtime_hint(backend)
     if not sd_cli_hint:
-        env_name = (
-            "MAGE_CPU_PREBUILT_SD_CLI"
-            if backend == "cpu"
-            else "MAGE_CUDA_PREBUILT_SD_CLI"
-        )
+        env_name = runtime_spec_for_backend(backend).env_var
         raise FileNotFoundError(
             f"prebuilt runtime is required for {backend}; set {env_name}"
         )
     sd_cli = Path(sd_cli_hint)
+    runtime_spec = runtime_spec_for_backend(backend)
+    runtime_sha256 = sha256_file(sd_cli)
+    if runtime_sha256 != runtime_spec.sha256:
+        raise ValueError(
+            f"runtime sha256 mismatch for {backend}: "
+            f"expected {runtime_spec.sha256}, got {runtime_sha256}"
+        )
     manager = RuntimeManager(kaggle_cache_root(), explicit_sd_cli=str(sd_cli))
     identity = manager.verify(sd_cli, requested_backend=backend)
+    _validate_runtime_cuda_devices(backend, identity.devices_output)
 
     from mageflow_native.inference.runner import run_generation
 
@@ -96,8 +90,10 @@ def run_qualification(
     runs_dir = work_root / "output" / ".runs"
     output_dir.mkdir(parents=True, exist_ok=True)
     request_id = f"qual-{profile}-{backend}"
+    source_head, source_tree = _source_identity(repo_dir)
 
-    print(f"SOURCE_HEAD={_source_head(repo_dir) if repo_dir else 'n/a'}", flush=True)
+    print(f"SOURCE_HEAD={source_head}", flush=True)
+    print(f"SOURCE_TREE={source_tree}", flush=True)
     print(f"QUALIFICATION_PROFILE={profile}", flush=True)
     print(f"QUALIFICATION_BACKEND={backend}", flush=True)
     print(f"MEM_TOTAL_KB={mem_total_kb}", flush=True)
@@ -121,6 +117,11 @@ def run_qualification(
         collect_cuda=(backend == "cuda0"),
     )
 
+    if backend == "cpu" and result.minimum_mem_available_kb is None:
+        raise ValueError("CPU qualification requires minimum memory available telemetry")
+    if backend == "cuda0" and (result.gpu_peak_mib is None or result.gpu_peak_mib <= 0):
+        raise ValueError("cuda0 qualification requires positive gpu_peak_mib")
+
     validate_profile_result(
         profile,
         backend=backend,
@@ -128,10 +129,24 @@ def run_qualification(
     )
 
     evidence = {
-        "source_head": _source_head(repo_dir) if repo_dir else None,
-        "runtime_commit": identity.pinned_commit,
-        "runtime_version": identity.version_output,
-        "devices": identity.devices_output,
+        "schema_version": 2,
+        "release_version": "1.0.0",
+        "source_head": source_head,
+        "source_tree": source_tree,
+        "runtime": {
+            "commit": identity.pinned_commit,
+            "version": identity.version_output,
+            "devices": identity.devices_output,
+            "path": identity.path,
+            "sha256": runtime_sha256,
+        },
+        "session": {
+            "hostname": os.uname().nodename,
+            "backend": backend,
+            "cuda_device_order": os.environ.get("CUDA_DEVICE_ORDER"),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "physical_gpus": physical_gpus,
+        },
         "profile": selected_profile.name,
         "backend": backend,
         "memory": {
