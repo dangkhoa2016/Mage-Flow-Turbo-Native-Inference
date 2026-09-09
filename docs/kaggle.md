@@ -2,65 +2,125 @@
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](kaggle.vi.md)
 
-Kaggle is a tested adapter/reference environment. The public production notebook reuses verified **prebuilt native runtimes** and does not compile `stable-diffusion.cpp`.
+The public notebook is a reproduction/demo path. A fresh public Q8/T4 notebook
+smoke is supplemental reproduction evidence and never replaces the retained
+strict 2×2 benchmark authority.
 
-## Accelerator policy
+## Exact Kaggle onboarding: Input → Add Input
 
-The notebook detects hardware before runtime or model discovery:
+1. In the Kaggle editor, open **Session options → Accelerator**. Select
+   `None` for CPU, or NVIDIA T4/T4x2 for CUDA. Do not use P100, TPU, or another
+   accelerator.
+2. Open **Input → Add Input**. The runtime entries below are **Kaggle
+   Datasets**; attach exactly one that matches the selected accelerator:
 
-- `Accelerator=None` → `cpu`
-- NVIDIA T4 → `cuda0`
-- NVIDIA T4x2 → `cuda0`, physical slot 0 only with `CUDA_VISIBLE_DEVICES=0`
-- P100, TPU/v5e-8, mixed GPUs and every other unsupported accelerator → hard FAIL
+   | Accelerator | Dataset slug |
+   |---|---|
+   | `None` / CPU | `dangkhoa2016/stable-diffusion-cpp-6b3edaa-portable-cpu-runtime` |
+   | T4 or T4x2 | `dangkhoa2016/stable-diffusion-cpp-6b3edaa-cuda-t4-runtime` |
 
-There is no silent CPU fallback from an attached unsupported accelerator. If the exact prebuilt runtime for the detected backend is missing or hash-mismatched, the notebook fails; it does not build from source.
+3. In **Input → Add Input**, select **Kaggle Models** (not Datasets) for the
+   model inputs. Mage-Flow is
+   `dangkhoa2016/mage-flow-community-mage-flow-turbo`; Qwen is
+   `dangkhoa2016/qwen-qwen3-vl-4b-instruct-gguf`.
+
+For `q8-reference`, attach Mage-Flow **GGUF / q8-0** and **PyTorch /
+vae-only**, plus Qwen **GGUF / q4-k-m**. For `bf16-safetensors`, attach only
+Mage-Flow **PyTorch / default** plus Qwen **GGUF / q4-k-m**. Mage-Flow
+**PyTorch / default** already contains the BF16 diffusion model and VAE: do
+not add **GGUF / q8-0** or **PyTorch / vae-only** to a BF16 session. Never mix
+the Q8 and BF16 Mage-Flow attachment families in a normal session.
+
+### Recommended fresh BF16 T4x2 reproduction checklist
+
+Before running, set the configuration cell to:
+
+```python
+RUN_MODE = "experiment"
+MODEL_PROFILE = "bf16-safetensors"
+RESOLUTION_PRESET = "auto"
+RUN_FAIR_COMPARISON_BENCHMARK = False
+
+ALLOW_SOURCE_BUILD = False
+
+ENABLE_REST_DEMO = True
+RUN_REST_GENERATION = True
+ENABLE_QUICK_TUNNEL = False
+I_UNDERSTAND_QUICK_TUNNEL_IS_PUBLIC = False
+```
+
+The final **Input → Add Input** state must be:
+
+- ATTACH Dataset: `dangkhoa2016/stable-diffusion-cpp-6b3edaa-cuda-t4-runtime`
+- ATTACH Model: `dangkhoa2016/mage-flow-community-mage-flow-turbo` →
+  **PyTorch / default**
+- ATTACH Model: `dangkhoa2016/qwen-qwen3-vl-4b-instruct-gguf` →
+  **GGUF / q4-k-m**
+- DO NOT ATTACH Mage-Flow **GGUF / q8-0**, Mage-Flow **PyTorch / vae-only**,
+  or the portable CPU runtime dataset.
+
+On T4x2, the expected markers are `ACCELERATOR_DETECTED=nvidia-t4x2`,
+`ACCELERATOR_POLICY=PASS`, `BACKEND_AUTO_SELECTED=cuda0`, and
+`GPU1_NOT_USED=PASS`. Once the checklist is satisfied, choose **Run → Run All**.
+
+## Accelerator and runtime policy
+
+- `Accelerator=None` selects backend `cpu` and the prebuilt CPU runtime.
+- NVIDIA T4 or T4x2 selects backend `cuda0` and the prebuilt CUDA T4 runtime.
+  CUDA authority uses physical slot 0 only with `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+  and `CUDA_VISIBLE_DEVICES=0`.
+- P100, TPU, mixed GPUs, and all other accelerators fail before discovery.
+
+The prebuilt CPU and CUDA T4 runtimes are **Kaggle Datasets**. Attach exactly
+one runtime dataset matching the selected accelerator; the notebook never
+builds `stable-diffusion.cpp` from source.
+
+## Model profiles
+
+Mage-Flow, Qwen, and VAE inputs are **Kaggle Models**. Select exactly one
+profile independently of the automatic CPU/T4 backend selection.
+
+| Profile | Required model attachments |
+|---|---|
+| `q8-reference` | Mage-Flow `GGUF / q8-0`, Qwen `GGUF / q4-k-m`, and Mage-Flow `PyTorch / vae-only` |
+| `bf16-safetensors` | Mage-Flow `PyTorch / default` and Qwen `GGUF / q4-k-m`; the default variation already includes the VAE, so do not attach separate `PyTorch / vae-only` |
+
+Normal manifest discovery fails closed if both Mage-Flow diffusion families are
+attached. Mixed-family tooling is controlled research only and is not allowed
+for any fresh release qualification cell.
 
 ## Public defaults
 
 ```python
 RUN_MODE = "experiment"
+MODEL_PROFILE = "q8-reference"
 RESOLUTION_PRESET = "auto"
 RUN_FAIR_COMPARISON_BENCHMARK = False
 ```
 
-`auto` resolves to 512×512 on CPU and 1024×1024 on CUDA0. Experiment mode allocates a unique automatic run label and isolated output directory for every Run All.
+Each **Run All** experiment has isolated local state. A reviewer may opt into
+the `qualification_matrix` view, but it is an inspection surface, not an
+instruction to rerun the retained four-cell authority merely because public
+documentation changed.
 
-## Canonical evidence mode
+## Retained qualification and public reproduction
 
-Maintainers collecting authoritative evidence use a fresh Kaggle session with:
+The canonical measurements remain bound to the measured benchmark evidence
+source HEAD/TREE recorded inside the retained evidence artifacts. The final
+publication source contains public notebook/documentation/contract-test
+corrections. A checksum-protected qualification-equivalence manifest bridges
+the identities only when qualification-critical Git objects are byte-identical;
+the measured evidence provenance is not rewritten.
 
-```python
-RUN_MODE = "evidence"
-RUN_FAIR_COMPARISON_BENCHMARK = True
-```
+1. `q8-reference` / `cpu`
+2. `bf16-safetensors` / `cpu`
+3. `q8-reference` / `cuda0`
+4. `bf16-safetensors` / `cuda0`
 
-The one-shot matrix is:
-
-```text
-512 → 640 → 768 → 1024
-```
-
-The evidence guard is written immediately before the first real generation. A second evidence transaction for the same backend requires a fresh Kaggle session.
-
-## Required inputs
-
-Attach the three canonical model inputs plus **only the runtime dataset matching the accelerator**:
-
-- CPU: `dangkhoa2016/stable-diffusion-cpp-6b3edaa-portable-cpu-runtime`
-- T4/T4x2: `dangkhoa2016/stable-diffusion-cpp-6b3edaa-cuda-t4-runtime`
-
-Exact runtime binary SHA-256:
-
-- CPU: `7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c`
-- CUDA T4: `3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0`
-
-## Measured canonical evidence
-
-| Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 512×512 | 215.816 s | 7.590 s | **28.43×** | 238.072 s | 27.209 s | **8.75×** | 7,930 MiB |
-| 640×640 | 338.014 s | 8.698 s | **38.86×** | 363.299 s | 29.040 s | **12.51×** | 8,356 MiB |
-| 768×768 | 491.700 s | 9.710 s | **50.64×** | 513.961 s | 30.072 s | **17.09×** | 8,702 MiB |
-| 1024×1024 | 939.371 s | 12.420 s | **75.63×** | 962.737 s | 33.047 s | **29.13×** | 9,316 MiB |
-
-At 1024×1024 the measured native-generation speedup is **75.63×**. See [BENCHMARKS-v1.0.0.md](BENCHMARKS-v1.0.0.md) for the full evidence identity and methodology.
+The retained records use their recorded source identity, selected profile,
+pinned runtime, and ordered `512 → 640 → 768 → 1024` matrix. Q8/CPU retains
+its documented same-session full-reset recovery exception; equivalence does not
+relabel it as fresh-session evidence. BF16 CPU retains its 27 GiB / 3 GiB
+safety gates; those gates do not apply to BF16 CUDA. Canonical measurements and
+evidence digests are published only in checksum-protected GitHub Release assets
+and body.
