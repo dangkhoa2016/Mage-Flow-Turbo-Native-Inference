@@ -32,6 +32,7 @@ from integrations.kaggle.runtime_adapter import kaggle_cache_root
 
 MATRIX_RESOLUTIONS = [512, 640, 768, 1024]
 SUPPORTED_MATRIX_BACKENDS = ("cpu", "cuda0")
+_ALLOWED_T4_NAMES = {"Tesla T4", "NVIDIA T4"}
 
 
 @dataclass(frozen=True)
@@ -154,11 +155,62 @@ def _models_evidence(verified: dict, manifest) -> dict:
     }
 
 
-def _validate_cuda_session_policy(backend: str) -> None:
+def _probe_physical_gpus() -> list[dict[str, object]]:
+    completed = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,name",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    gpus: list[dict[str, object]] = []
+    for raw in completed.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        index_text, separator, name = line.partition(",")
+        if not separator:
+            raise ValueError(f"unexpected nvidia-smi GPU row: {line!r}")
+        gpus.append({"index": int(index_text.strip()), "name": name.strip()})
+    return gpus
+
+
+def _validate_cuda_session_policy(backend: str) -> list[dict[str, object]]:
     if backend != "cuda0":
-        return
+        return []
+    if os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+        raise ValueError("cuda0 qualification requires CUDA_DEVICE_ORDER=PCI_BUS_ID")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != "0":
         raise ValueError("cuda0 qualification requires CUDA_VISIBLE_DEVICES=0")
+
+    gpus = _probe_physical_gpus()
+    if len(gpus) not in (1, 2):
+        raise ValueError(
+            f"T4 qualification requires a T4 or T4x2 physical host; detected {len(gpus)} GPUs"
+        )
+    if [gpu["index"] for gpu in gpus] != list(range(len(gpus))):
+        raise ValueError(f"unexpected physical GPU indices: {gpus}")
+    invalid_names = [gpu["name"] for gpu in gpus if gpu["name"] not in _ALLOWED_T4_NAMES]
+    if invalid_names:
+        raise ValueError(
+            "T4 qualification requires only NVIDIA T4 GPUs; detected "
+            + ", ".join(str(name) for name in invalid_names)
+        )
+    return gpus
+
+
+def _validate_runtime_cuda_devices(backend: str, devices_output: str) -> None:
+    if backend != "cuda0":
+        return
+    normalized = devices_output.lower()
+    if "cuda0" not in normalized:
+        raise ValueError("cuda0 qualification runtime did not expose cuda0")
+    if "cuda1" in normalized:
+        raise ValueError("cuda0 qualification runtime must not expose cuda1")
 
 
 def run_matrix(
@@ -194,13 +246,15 @@ def run_matrix(
     session_evidence = {
         "hostname": os.uname().nodename,
         "backend": backend,
+        "cuda_device_order": os.environ.get("CUDA_DEVICE_ORDER"),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "physical_gpus": [],
     }
 
     try:
         if backend not in SUPPORTED_MATRIX_BACKENDS:
             raise ValueError(f"unsupported matrix backend: {backend!r}")
-        _validate_cuda_session_policy(backend)
+        session_evidence["physical_gpus"] = _validate_cuda_session_policy(backend)
 
         mem_total_kb = _mem_total_kb()
         mem_available_before_kb = read_mem_available_kb()
@@ -233,6 +287,7 @@ def run_matrix(
             )
         manager = RuntimeManager(kaggle_cache_root(), explicit_sd_cli=str(sd_cli))
         identity = manager.verify(sd_cli, requested_backend=backend)
+        _validate_runtime_cuda_devices(backend, identity.devices_output)
         timing["runtime_verify_elapsed_ms"] = _elapsed_ms(runtime_start)
 
         source_head, source_tree = _source_identity(repo_dir)
