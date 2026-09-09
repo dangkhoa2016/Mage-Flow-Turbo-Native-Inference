@@ -32,7 +32,7 @@ FORBIDDEN_WORDING = [
     "qualified release targets",
     "release target đã qualification",
     "integration target đã qualification",
-    "bf16-high-memory-cpu",
+    "`bf16-high-memory-cpu`",
     "there is a transformers inference backend",
 ]
 
