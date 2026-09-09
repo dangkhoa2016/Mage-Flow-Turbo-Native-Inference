@@ -7,65 +7,100 @@
 
 > 🌐 Language / Ngôn ngữ: [English](README.md) | **Tiếng Việt**
 
-**Bộ công cụ suy luận native di động cho Mage-Flow-Turbo.** Dự án không huấn luyện hoặc sửa trọng số model. Python đảm nhận cấu hình, xác minh, điều phối CLI/REST, lifecycle và evidence; suy luận thực tế do runtime native `stable-diffusion.cpp` (`sd-cli`) thực hiện.
+**Bộ công cụ suy luận và triển khai native di động cho Mage-Flow-Turbo.** Repository không huấn luyện hoặc sửa trọng số model. Python đảm nhận cấu hình, xác minh danh tính model/runtime, điều phối CLI/REST, lifecycle, telemetry và evidence; phần thực thi model thật sự đi qua runtime native `stable-diffusion.cpp` `sd-cli`.
 
-```text
-manifest → xác minh SHA-256 → runtime sd-cli đã pin
-        → Mage-Flow-Turbo DiT Q8_0
-        → Qwen3-VL-4B text encoder Q4_K_M
-        → VAE riêng
-        → Linux CPU hoặc NVIDIA CUDA cuda0
-        → PNG + evidence có cấu trúc
-```
+Tên dự án mô tả **execution stack**, không mô tả một quantization hoặc serialization duy nhất. v1.0.0 hỗ trợ profile Q8 GGUF canonical và profile BF16 SafeTensors, cả hai dùng cùng native runtime.
 
-## Reference stack chính xác
+## Các profile model của v1.0.0
 
-| Vai trò | Artifact chính xác | Định dạng / lượng tử hóa |
+| Profile | Mage-Flow diffusion | Text encoder | VAE | Native runtime | CPU | CUDA `cuda0` | Vai trò |
+|---|---|---|---|---|---:|---:|---|
+| `q8-reference` | GGUF `Q8_0` | Qwen3-VL-4B GGUF `Q4_K_M` | SafeTensors | `stable-diffusion.cpp` `sd-cli` đã pin | có | có | canonical/default |
+| `bf16-safetensors` | BF16 SafeTensors | Qwen3-VL-4B GGUF `Q4_K_M` | SafeTensors | `stable-diffusion.cpp` `sd-cli` đã pin | có | có | profile thay thế được hỗ trợ |
+
+Dự án **không** cung cấp Hugging Face Transformers inference backend và **không** chạy vòng lặp suy luận bằng PyTorch/Transformers. Cụm `PyTorch/Transformers` trong provenance hoặc đường dẫn model mirror chỉ nói về nguồn/layout phân phối artifact BF16 SafeTensors, không phải framework dùng để inference.
+
+Dự án cũng không phải “GGUF-only”: ngay profile Q8 canonical vẫn dùng VAE SafeTensors.
+
+## Danh tính model/runtime đóng băng
+
+| Vai trò | Artifact / danh tính | Định dạng |
 |---|---|---|
-| Diffusion model | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 |
+| Q8 diffusion | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 |
+| BF16 diffusion | `diffusion_pytorch_model.safetensors` từ Mage-Flow `PyTorch / default` | BF16 SafeTensors |
 | Text encoder | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | GGUF Q4_K_M |
 | VAE | `diffusion_pytorch_model.safetensors` | SafeTensors |
-| Runtime native | `stable-diffusion.cpp` `sd-cli` | commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
+| Native runtime | `stable-diffusion.cpp` `sd-cli` | commit đã pin `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
 
-## Phạm vi qualification v1.0.0
+Exact SHA-256 được kiểm tra trước real inference. Git repository không chứa model weights.
 
-| Môi trường | Backend | Vai trò |
-|---|---|---|
-| Linux x86-64 | CPU | release target bắt buộc |
-| Linux + NVIDIA GPU | CUDA `cuda0` | release target bắt buộc |
-| Kaggle Accelerator=None | CPU tự chọn | production/evidence integration target |
-| Kaggle NVIDIA T4/T4x2 | CUDA `cuda0` tự chọn trên physical GPU 0 | production/evidence integration target |
+## Strict 2×2 qualification matrix cho v1.0.0
 
-Production notebook Kaggle chỉ dùng **prebuilt runtime**: Accelerator=None chọn CPU; T4/T4x2 chọn CUDA0 slot 0; P100, TPU và accelerator khác fail closed. Không fallback CPU từ GPU không hỗ trợ và không source-build fallback.
+Release public đầu tiên được qualification bằng bốn fresh cell:
 
-## Benchmark fresh CPU ↔ T4 canonical
+| Profile | Kaggle CPU | Kaggle T4/T4x2 `cuda0` |
+|---|---:|---:|
+| `q8-reference` | fresh exact-head matrix | fresh exact-head matrix |
+| `bf16-safetensors` | fresh exact-head matrix | fresh exact-head matrix |
 
-Hai evidence session authoritative dùng cùng notebook source, source HEAD, model inputs, prompt, seed, steps, CFG, threads và thứ tự matrix.
+Mỗi cell dùng cùng frozen source HEAD/TREE và cùng canonical protocol:
 
-| Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 512×512 | 215.816 s | 7.590 s | **28.43×** | 238.072 s | 27.209 s | **8.75×** | 7,930 MiB |
-| 640×640 | 338.014 s | 8.698 s | **38.86×** | 363.299 s | 29.040 s | **12.51×** | 8,356 MiB |
-| 768×768 | 491.700 s | 9.710 s | **50.64×** | 513.961 s | 30.072 s | **17.09×** | 8,702 MiB |
-| 1024×1024 | 939.371 s | 12.420 s | **75.63×** | 962.737 s | 33.047 s | **29.13×** | 9,316 MiB |
+```text
+prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
+seed    = 42
+steps   = 4
+CFG     = 1.0
+threads = 4
+matrix  = 512 → 640 → 768 → 1024
+```
 
-**Headline:** ở 1024×1024, native generation trên T4 mất **12,420 giây** so với **939,371 giây** trên CPU — nhanh hơn **75.63×** khi so cùng resolution.
+Mỗi resolution được generate đúng một lần trong authority session. Matrix chạy tuần tự và fail-fast. Nếu một resolution phía sau gặp giới hạn platform/runtime thật, evidence sẽ ghi nhận giới hạn đó thay vì âm thầm đổi placement hoặc bịa ratio.
 
-Xem [evidence benchmark đầy đủ](docs/BENCHMARKS-v1.0.0.vi.md) để biết notebook/runtime hash, methodology và quy tắc diễn giải.
+### Policy CPU
+
+- Kaggle `Accelerator=None`;
+- backend chính xác `cpu`;
+- chỉ dùng prebuilt CPU `sd-cli`;
+- không CUDA fallback;
+- ghi host-memory và process-RSS telemetry;
+- BF16 CPU giữ các gate RAM/headroom riêng.
+
+### Policy T4/T4x2
+
+- host phải là T4 hoặc T4x2;
+- release qualification chỉ dùng physical GPU slot 0;
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID`;
+- `CUDA_VISIBLE_DEVICES=0`;
+- effective inference backend là `cuda0`;
+- không `cuda1`, không multi-GPU split, không `auto-fit`, không CPU inference fallback;
+- chỉ dùng prebuilt CUDA runtime;
+- generation CUDA thành công phải có VRAM telemetry dương.
+
+Vì vậy T4x2 chỉ là host configuration; v1.0.0 vẫn là strict single-T4 benchmark.
+
+## Chính sách publish fresh benchmark
+
+Fresh strict 2×2 measurements được tạo **sau final source freeze**. Comparator đã đóng băng sẽ kiểm tra source HEAD/TREE, canonical request, model identities, runtime commit và runtime SHA theo backend trước khi tính ratio. Renderer đã đóng băng sau đó sinh bảng Markdown dùng cho GitHub Release.
+
+Số liệu cuối cùng được publish thành GitHub Release assets/body có checksum thay vì paste ngược vào source sau qualification. Cách này tránh làm mất exact-head authority chỉ vì sửa README sau benchmark.
+
+Xem [benchmark contract](docs/BENCHMARKS-v1.0.0.vi.md).
 
 ## Vì sao dùng native inference?
 
-Diffusion, text conditioning và VAE decoding do `sd-cli` thực hiện; không có vòng lặp inference PyTorch/Transformers trong dự án. Python xác minh model, dựng subprocess argv tường minh với `shell=False`, giám sát native process và ghi evidence.
+Diffusion, text conditioning và VAE decoding do `sd-cli` thực hiện. Python xác minh identity, dựng subprocess argument tường minh với `shell=False`, giám sát native process, kiểm tra PNG và ghi structured evidence.
 
-## Xác minh model stack
+Hai profile dùng chung một execution engine, nhờ đó so sánh Q8/BF16 × CPU/CUDA dễ audit hơn đáng kể.
+
+## Xác minh Q8 reference stack
 
 ```bash
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-## Linux CPU cục bộ
+## Phát triển local Linux
 
-Generic CLI vẫn hỗ trợ build runtime cục bộ khi chủ động phát triển ngoài production Kaggle notebook:
+Generic CLI có thể build local runtime khi chủ động phát triển ngoài release qualification:
 
 ```bash
 python -m pip install -e .
@@ -74,7 +109,9 @@ mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-## NVIDIA CUDA
+Riêng release qualification là **prebuilt-runtime only**.
+
+## Phát triển NVIDIA CUDA
 
 ```bash
 python -m pip install -e .
@@ -82,9 +119,11 @@ mageflow-native runtime build --backend cuda
 mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json --backend cuda0
 ```
 
+Release qualification dùng placement `cuda0` xác định trước, không dùng automatic splitting.
+
 ## REST API
 
-Service tham chiếu bind vào `127.0.0.1` theo mặc định.
+Reference service bind vào `127.0.0.1` theo mặc định.
 
 ```text
 GET  /healthz
@@ -94,49 +133,41 @@ POST /v1/images/generate
 GET  /v1/artifacts/<png>
 ```
 
-## Kaggle
+## Kaggle integration
 
-Notebook public [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) tự detect accelerator Kaggle được hỗ trợ. Mặc định public là `RUN_MODE="experiment"` và `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainer có thể bật one-shot `evidence` mode để chạy matrix đóng băng `512 → 640 → 768 → 1024`. Xem [docs/kaggle.vi.md](docs/kaggle.vi.md).
+Notebook public [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) detect accelerator Kaggle được hỗ trợ. Với release qualification, dùng dedicated matrix harness và exact prebuilt runtime/profile inputs thay vì dựa vào notebook defaults. Xem [docs/kaggle.vi.md](docs/kaggle.vi.md).
 
-### Policy attach model trên Kaggle
+### Policy attach model
 
-Với inference thông thường, chỉ attach đúng Mage-Flow-Turbo diffusion family mà profile đã chọn cần dùng.
+Trong một qualification/inference session thông thường, chỉ attach đúng một Mage-Flow-Turbo diffusion family:
 
-- `q8-reference` — attach Mage-Flow `GGUF / q8-0`; Qwen GGUF dùng chung và VAE-only SafeTensors vẫn là thành phần hợp lệ.
-- `bf16-high-memory-cpu` — attach Mage-Flow `PyTorch / default` chứa BF16 transformer/VAE, cùng Qwen text encoder dùng chung.
+- `q8-reference` — Mage-Flow `GGUF / q8-0`, Qwen GGUF dùng chung và VAE-only SafeTensors;
+- `bf16-safetensors` — Mage-Flow `PyTorch / default` BF16 transformer/VAE cùng Qwen GGUF dùng chung.
 
-Không attach đồng thời cả Mage-Flow `GGUF / q8-0` và `PyTorch / default` trong một Kaggle session inference thông thường.
+Không attach đồng thời hai Mage diffusion families trong authority session thông thường. Mixed-family attachment chỉ dành cho research tooling có kiểm soát và không thuộc bốn fresh release qualification cells.
 
-Ngoại lệ duy nhất là benchmark/comparison có kiểm soát; khi đó hai profile phải được verify và chạy tuần tự, không chạy đồng thời.
+## Historical BF16 CPU visual research
 
-Với người dùng bình thường: **một profile được chọn cho mỗi Kaggle session**.
+Trước redesign strict 2×2, dự án đã thực hiện một paired visual study 768×768 trên CPU cùng host để so Q8 và BF16. Nghiên cứu lịch sử đó vẫn hữu ích cho hướng chất lượng, nhưng không phải final v1.0.0 2×2 performance authority và không quyết định default profile. Q8 vẫn là canonical/default.
 
-BF16 là profile experimental, opt-in, hướng RAM cao / chất lượng; Q8 vẫn là profile mặc định/canonical.
-
-### Evidence CPU BF16
-
-Một benchmark visual paired 768×768 cùng máy đã hoàn tất trên 4 CPU threads:
-
-| Profile CPU đã test | Mean / hình | Peak `sd-cli` RSS | Vai trò hiện tại |
-|---|---:|---:|---|
-| `q8-reference` | ~10,67 phút | ~8,89 GB | canonical/default |
-| `bf16-high-memory-cpu` | ~16,90 phút | ~12,54 GB | supported opt-in experimental |
-
-Trong so sánh blind 768×768 10 cặp đã hoàn tất, BF16 thắng 4 prompt, Q8 thắng 3 và 3 hoà; chỉ một win của BF16 là rõ ràng về mặt vật chất. Vì vậy BF16 vẫn khả dụng cho thử nghiệm hướng chất lượng, nhưng evidence hiện tại không đủ để thay Q8 làm mặc định. Xem [docs/BF16-HIGH-MEMORY-CPU.vi.md](docs/BF16-HIGH-MEMORY-CPU.vi.md).
+Xem [BF16 SafeTensors background và qualification policy](docs/BF16-HIGH-MEMORY-CPU.vi.md).
 
 ## Tái lập và evidence
 
-Canonical request:
+Output CPU và CUDA có thể khác byte-for-byte do numerical backend khác nhau. Release evidence ghi:
 
-```text
-prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
-seed    = 42
-steps   = 4
-CFG     = 1.0
-threads = 4
-```
+- exact source HEAD và TREE;
+- profile/backend identity;
+- tên/format/SHA-256 của các model component;
+- pinned native runtime commit và binary SHA-256;
+- canonical request và resolution;
+- elapsed time;
+- host memory / process RSS;
+- CUDA peak VRAM khi áp dụng;
+- PNG filename, dimensions, byte count và SHA-256;
+- failure classification tường minh khi matrix dừng.
 
-Output CPU và CUDA có thể khác byte-for-byte do backend số học khác nhau. Evidence ghi exact source/runtime/model identity, backend, prompt, dimensions, timing class, memory telemetry và PNG SHA-256.
+Evidence archives có checksum, internal manifest, và fail nếu chứa model weights hoặc known secret patterns.
 
 ## Tài liệu
 
@@ -145,7 +176,8 @@ Output CPU và CUDA có thể khác byte-for-byte do backend số học khác nh
 - [Linux cục bộ](docs/local-linux.md)
 - [CUDA](docs/cuda.md)
 - [Kaggle](docs/kaggle.vi.md)
-- [Benchmark canonical](docs/BENCHMARKS-v1.0.0.vi.md)
+- [Strict v1.0.0 benchmark contract](docs/BENCHMARKS-v1.0.0.vi.md)
+- [BF16 SafeTensors profile](docs/BF16-HIGH-MEMORY-CPU.vi.md)
 - [REST API](docs/REST-API.md)
 - [Kiểm thử](docs/TESTING.vi.md)
 - [Xử lý sự cố](docs/TROUBLESHOOTING.vi.md)
