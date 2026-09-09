@@ -1,9 +1,15 @@
 import hashlib
+import importlib.util
 import sys
 import tarfile
 from pathlib import Path
 
-from scripts.qualification import package_evidence
+ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_EVIDENCE_PATH = ROOT / "scripts" / "qualification" / "package-evidence.py"
+_SPEC = importlib.util.spec_from_file_location("package_evidence_script", PACKAGE_EVIDENCE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+package_evidence = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(package_evidence)
 
 
 def _run(monkeypatch, evidence: Path, out: Path, label: str) -> int:
@@ -48,7 +54,8 @@ def test_packager_rejects_model_weights(tmp_path, monkeypatch):
         (evidence / f"model{suffix}").write_bytes(b"weight")
         out = tmp_path / f"out-{index}"
         assert _run(monkeypatch, evidence, out, f"cell-{index}") == 3
-        assert not list(out.glob("*.tar.gz")) if out.exists() else True
+        if out.exists():
+            assert not list(out.glob("*.tar.gz"))
 
 
 def test_archive_paths_and_internal_manifest_are_safe(tmp_path, monkeypatch):
