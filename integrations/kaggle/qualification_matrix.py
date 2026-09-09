@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from mageflow_native.constants import (
@@ -21,7 +22,7 @@ from mageflow_native.runtime.spec import BackendSpec
 from mageflow_native.telemetry import read_mem_available_kb
 from integrations.kaggle.input_adapter import build_kaggle_manifest
 from integrations.kaggle.profiles import (
-    BF16_HIGH_MEMORY_CPU_PROFILE,
+    BF16_SAFETENSORS_PROFILE,
     Q8_REFERENCE_PROFILE,
     ProfilePreflightError,
     validate_profile_environment,
@@ -30,12 +31,32 @@ from integrations.kaggle.profiles import (
 from integrations.kaggle.runtime_adapter import kaggle_cache_root
 
 MATRIX_RESOLUTIONS = [512, 640, 768, 1024]
-CPU_BACKEND = "cpu"
-MATRIX_BACKENDS = (CPU_BACKEND,)
-BF16_CPU_RUNTIME_ENV = "MAGE_CPU_PREBUILT_SD_CLI"
-BF16_CPU_RUNTIME_SHA256 = (
-    "7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c"
-)
+SUPPORTED_MATRIX_BACKENDS = ("cpu", "cuda0")
+
+
+@dataclass(frozen=True)
+class RuntimeSpec:
+    env_var: str
+    sha256: str
+
+
+_RUNTIME_SPECS = {
+    "cpu": RuntimeSpec(
+        env_var="MAGE_CPU_PREBUILT_SD_CLI",
+        sha256="7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c",
+    ),
+    "cuda0": RuntimeSpec(
+        env_var="MAGE_CUDA_PREBUILT_SD_CLI",
+        sha256="3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0",
+    ),
+}
+
+
+def runtime_spec_for_backend(backend: str) -> RuntimeSpec:
+    try:
+        return _RUNTIME_SPECS[backend]
+    except KeyError as exc:
+        raise ValueError(f"unsupported matrix backend: {backend!r}") from exc
 
 
 def _mem_total_kb() -> int:
@@ -44,22 +65,24 @@ def _mem_total_kb() -> int:
     return (page_size * phys_pages) // 1024
 
 
-def _source_head(repo_dir: Path | None) -> str:
+def _git_rev(repo_dir: Path, expression: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", expression],
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    ).stdout.strip()
+
+
+def _source_identity(repo_dir: Path | None) -> tuple[str, str]:
     if repo_dir is None:
-        return "unknown"
+        return "unknown", "unknown"
     try:
-        return (
-            subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(repo_dir),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            .stdout.strip()
-        )
+        return _git_rev(repo_dir, "HEAD"), _git_rev(repo_dir, "HEAD^{tree}")
     except Exception:
-        return "unknown"
+        return "unknown", "unknown"
 
 
 def _elapsed_ms(start: float) -> int:
@@ -93,11 +116,12 @@ def validate_resolutions(resolutions: list[int]) -> list[int]:
     return list(resolutions)
 
 
-def resolve_prebuilt_runtime() -> Path:
-    hint = os.environ.get(BF16_CPU_RUNTIME_ENV)
+def resolve_prebuilt_runtime(backend: str) -> Path:
+    spec = runtime_spec_for_backend(backend)
+    hint = os.environ.get(spec.env_var)
     if not hint:
         raise FileNotFoundError(
-            f"{BF16_CPU_RUNTIME_ENV} is not set; a prebuilt sd-cli is required"
+            f"{spec.env_var} is not set; a prebuilt sd-cli is required for {backend}"
         )
     path = Path(hint).expanduser()
     if not path.is_file():
@@ -130,12 +154,19 @@ def _models_evidence(verified: dict, manifest) -> dict:
     }
 
 
+def _validate_cuda_session_policy(backend: str) -> None:
+    if backend != "cuda0":
+        return
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "0":
+        raise ValueError("cuda0 qualification requires CUDA_VISIBLE_DEVICES=0")
+
+
 def run_matrix(
     *,
     input_root: Path,
     work_root: Path,
     backend: str,
-    profile: str = BF16_HIGH_MEMORY_CPU_PROFILE,
+    profile: str = BF16_SAFETENSORS_PROFILE,
     repo_dir: Path | None = None,
     resolutions: list[int] | None = None,
     timeout_seconds: int = 2700,
@@ -150,7 +181,8 @@ def run_matrix(
     completed: list[int] = []
     failed: dict | None = None
     error: dict | None = None
-    source_head: str | None = "unknown"
+    source_head = "unknown"
+    source_tree = "unknown"
     matrix_id: str | None = None
     runtime_evidence: dict = {}
     models_evidence: dict = {}
@@ -159,12 +191,16 @@ def run_matrix(
     mem_available_before_kb: int | None = None
     matrix_start: float | None = None
     output_dir = work_root / "output"
+    session_evidence = {
+        "hostname": os.uname().nodename,
+        "backend": backend,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    }
 
     try:
-        if backend not in MATRIX_BACKENDS:
-            raise ValueError(
-                f"matrix harness is CPU-only; unsupported backend: {backend!r}"
-            )
+        if backend not in SUPPORTED_MATRIX_BACKENDS:
+            raise ValueError(f"unsupported matrix backend: {backend!r}")
+        _validate_cuda_session_policy(backend)
 
         mem_total_kb = _mem_total_kb()
         mem_available_before_kb = read_mem_available_kb()
@@ -187,18 +223,19 @@ def run_matrix(
         timing["manifest_verify_elapsed_ms"] = _elapsed_ms(verify_start)
 
         runtime_start = time.monotonic()
-        sd_cli = resolve_prebuilt_runtime()
+        runtime_spec = runtime_spec_for_backend(backend)
+        sd_cli = resolve_prebuilt_runtime(backend)
         runtime_sha256 = sha256_file(sd_cli)
-        if runtime_sha256 != BF16_CPU_RUNTIME_SHA256:
+        if runtime_sha256 != runtime_spec.sha256:
             raise ValueError(
-                "runtime sha256 mismatch: "
-                f"expected {BF16_CPU_RUNTIME_SHA256}, got {runtime_sha256}"
+                f"runtime sha256 mismatch for {backend}: "
+                f"expected {runtime_spec.sha256}, got {runtime_sha256}"
             )
         manager = RuntimeManager(kaggle_cache_root(), explicit_sd_cli=str(sd_cli))
         identity = manager.verify(sd_cli, requested_backend=backend)
         timing["runtime_verify_elapsed_ms"] = _elapsed_ms(runtime_start)
 
-        source_head = _source_head(repo_dir)
+        source_head, source_tree = _source_identity(repo_dir)
         matrix_id = f"matrix-{profile}-{backend}-{int(time.time())}"
         timing["setup_elapsed_ms"] = _elapsed_ms(wall_start)
 
@@ -216,10 +253,14 @@ def run_matrix(
         models_evidence = _models_evidence(verified, manifest)
 
         context = {
+            "schema_version": 2,
+            "release_version": "1.0.0",
             "source_head": source_head,
+            "source_tree": source_tree,
             "profile": profile,
             "backend": backend,
             "matrix_id": matrix_id,
+            "session": session_evidence,
             "runtime": runtime_evidence,
             "manifest": manifest_evidence,
             "models": models_evidence,
@@ -228,6 +269,7 @@ def run_matrix(
         }
 
         print(f"MATRIX_SOURCE_HEAD={source_head}", flush=True)
+        print(f"MATRIX_SOURCE_TREE={source_tree}", flush=True)
         print(f"MATRIX_PROFILE={profile}", flush=True)
         print(f"MATRIX_BACKEND={backend}", flush=True)
         print(f"MATRIX_ID={matrix_id}", flush=True)
@@ -246,9 +288,7 @@ def run_matrix(
                 error = {
                     "phase": "telemetry",
                     "type": "MissingTelemetryError",
-                    "message": (
-                        "per-run memory available telemetry (before) is missing"
-                    ),
+                    "message": "per-run memory available telemetry (before) is missing",
                 }
                 failed = {"resolution": resolution}
                 records.append(
@@ -284,7 +324,7 @@ def run_matrix(
                     runs_dir=runs_dir,
                     client_request_id=request_id,
                     timeout_seconds=timeout_seconds,
-                    collect_cuda=False,
+                    collect_cuda=(backend == "cuda0"),
                 )
             except Exception as exc:
                 error = {
@@ -295,16 +335,24 @@ def run_matrix(
 
             mem_available_after_run_kb = read_mem_available_kb()
 
-            if error is None and result.minimum_mem_available_kb is None:
+            if error is None and backend == "cpu" and result.minimum_mem_available_kb is None:
                 error = {
                     "phase": "telemetry",
                     "type": "MissingTelemetryError",
                     "message": "minimum memory available telemetry is missing",
                 }
+            if error is None and backend == "cuda0":
+                if result.gpu_peak_mib is None or result.gpu_peak_mib <= 0:
+                    error = {
+                        "phase": "telemetry",
+                        "type": "MissingCudaTelemetryError",
+                        "message": "cuda0 qualification requires positive gpu_peak_mib",
+                    }
             if error is None:
                 try:
                     validate_profile_result(
                         profile,
+                        backend=backend,
                         minimum_mem_available_kb=result.minimum_mem_available_kb,
                     )
                 except ProfilePreflightError as exc:
@@ -346,7 +394,8 @@ def run_matrix(
             print(
                 f"MATRIX_GENERATION {resolution} PASS "
                 f"elapsed_ms={result.elapsed_ms} "
-                f"min_available_kb={result.minimum_mem_available_kb}",
+                f"min_available_kb={result.minimum_mem_available_kb} "
+                f"gpu_peak_mib={result.gpu_peak_mib}",
                 flush=True,
             )
     except Exception as exc:
@@ -361,11 +410,15 @@ def run_matrix(
     timing["matrix_wall_elapsed_ms"] = _elapsed_ms(wall_start)
 
     aggregate = {
+        "schema_version": 2,
+        "release_version": "1.0.0",
         "status": "passed" if error is None else "failed",
         "source_head": source_head,
+        "source_tree": source_tree,
         "profile": profile,
         "backend": backend,
         "matrix_id": matrix_id,
+        "session": session_evidence,
         "matrix_resolutions": list(resolutions),
         "completed_resolutions": completed,
         "failed_resolution": failed,
@@ -393,14 +446,18 @@ def _write_record(
     result=None,
     mem_available_before_run_kb: int | None = None,
     mem_available_after_run_kb: int | None = None,
-) -> None:
+) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     record = {
+        "schema_version": context["schema_version"],
+        "release_version": context["release_version"],
         "status": status,
         "source_head": context["source_head"],
+        "source_tree": context["source_tree"],
         "profile": context["profile"],
         "backend": context["backend"],
         "matrix_id": context["matrix_id"],
+        "session": context["session"],
         "resolution": {"width": resolution, "height": resolution},
         "request": {
             "prompt": CANONICAL_PROMPT,
@@ -456,14 +513,16 @@ def _write_aggregate(output_dir: Path, aggregate: dict, *, profile: str, backend
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mageflow-kaggle-qualification-matrix")
-    parser.add_argument("--backend", choices=list(MATRIX_BACKENDS), required=True)
+    parser.add_argument(
+        "--backend", choices=list(SUPPORTED_MATRIX_BACKENDS), required=True
+    )
     parser.add_argument(
         "--profile",
-        choices=[Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE],
-        default=BF16_HIGH_MEMORY_CPU_PROFILE,
+        choices=[Q8_REFERENCE_PROFILE, BF16_SAFETENSORS_PROFILE],
+        default=BF16_SAFETENSORS_PROFILE,
     )
     parser.add_argument("--input-root", default="/kaggle/input")
-    parser.add_argument("--work-root", default="/kaggle/working/mageflow-bf16-matrix")
+    parser.add_argument("--work-root", default="/kaggle/working/mageflow-matrix")
     parser.add_argument("--repo-dir", default=None)
     parser.add_argument("--resolutions", default=None)
     args = parser.parse_args(argv)
