@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mageflow_native.models.manifest import sha256_file
 from integrations.kaggle.profiles import (
+    BF16_HIGH_MEMORY_CPU_PROFILE,
     Q8_REFERENCE_PROFILE,
     ComponentProfile,
     get_profile,
@@ -13,6 +14,16 @@ from integrations.kaggle.profiles import (
 
 class InputResolutionError(RuntimeError):
     pass
+
+
+class InputAttachmentPolicyError(InputResolutionError):
+    pass
+
+
+_MAGE_DIFFUSION_FAMILY_LABELS = {
+    Q8_REFERENCE_PROFILE: "GGUF q8-0",
+    BF16_HIGH_MEMORY_CPU_PROFILE: "PyTorch/Transformers SafeTensors default",
+}
 
 
 def _norm(p: Path) -> str:
@@ -100,13 +111,51 @@ def _manifest_component(path: Path, input_root: Path, component: ComponentProfil
     return data
 
 
+def detect_attached_diffusion_families(input_root: Path) -> tuple[str, ...]:
+    input_root = Path(input_root)
+    detected: list[str] = []
+    for profile_name in (Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE):
+        profile = get_profile(profile_name)
+        fragment = (profile.diffusion.required_fragment or "").strip("/").lower()
+        for candidate in input_root.rglob(profile.diffusion.filename):
+            if fragment and fragment in _norm(candidate):
+                detected.append(profile_name)
+                break
+    return tuple(detected)
+
+
+def validate_kaggle_input_attachment_policy(
+    input_root: Path,
+    *,
+    allow_mixed_diffusion_families: bool = False,
+) -> tuple[str, ...]:
+    families = detect_attached_diffusion_families(input_root)
+    if len(families) > 1 and not allow_mixed_diffusion_families:
+        described = ", ".join(
+            f"{name} ({_MAGE_DIFFUSION_FAMILY_LABELS[name]})" for name in families
+        )
+        raise InputAttachmentPolicyError(
+            "normal Kaggle inference requires exactly one Mage-Flow-Turbo "
+            "diffusion family; both Mage-Flow-Turbo diffusion families "
+            f"detected: {described}. Detach one family, then restart the "
+            "Kaggle session. The controlled benchmark is the only "
+            "mixed-family exception."
+        )
+    return families
+
+
 def build_kaggle_manifest(
     input_root: Path,
     output: str | Path,
     *,
     profile: str = Q8_REFERENCE_PROFILE,
+    allow_mixed_diffusion_families: bool = False,
 ) -> Path:
     input_root = Path(input_root)
+    validate_kaggle_input_attachment_policy(
+        input_root,
+        allow_mixed_diffusion_families=allow_mixed_diffusion_families,
+    )
     selected = get_profile(profile)
     dit = _discover_component(input_root, selected.diffusion)
     qwen = _discover_component(input_root, selected.text_encoder)

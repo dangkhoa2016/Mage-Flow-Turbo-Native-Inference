@@ -595,10 +595,14 @@ class VisualBenchmark:
         meta_dir.mkdir(parents=True, exist_ok=True)
         manifest_json_path = meta_dir / "model-manifest.json"
 
+        # The visual benchmark intentionally attaches both frozen diffusion
+        # families for controlled sequential A/B comparison. Normal inference
+        # remains fail-closed.
         build_kaggle_manifest(
             input_root=self.input_root,
             output=manifest_json_path,
             profile=profile,
+            allow_mixed_diffusion_families=True,
         )
 
         model_manifest = load_manifest(

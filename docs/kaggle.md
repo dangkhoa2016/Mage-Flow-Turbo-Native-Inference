@@ -54,6 +54,41 @@ Exact runtime binary SHA-256:
 - CPU: `7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c`
 - CUDA T4: `3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0`
 
+### Model-attachment policy
+
+One selected profile per Kaggle session. Normal `q8-reference` session:
+
+```text
+Mage-Flow GGUF/q8-0
+shared Qwen GGUF
+Mage-Flow VAE-only SafeTensors
+matching prebuilt runtime
+```
+
+Normal `bf16-high-memory-cpu` session:
+
+```text
+Mage-Flow PyTorch/default BF16 transformer + VAE
+shared Qwen GGUF
+matching prebuilt CPU runtime
+```
+
+Mixed session:
+
+```text
+allowed only for controlled benchmark/qualification
+profiles execute sequentially
+never keep two inference processes active concurrently
+```
+
+Attaching both the Mage-Flow `GGUF / q8-0` diffusion family and the Mage-Flow `PyTorch / default` diffusion family is detected during normal manifest discovery and fails closed before any model hashing. The visual benchmark is the only explicit mixed-family exception.
+
+If you change from Q8 to BF16 (or BF16 to Q8):
+
+```text
+Detach the unused model family, Restart Session, then Run All.
+```
+
 ## Measured canonical evidence
 
 | Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |

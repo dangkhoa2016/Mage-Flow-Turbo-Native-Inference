@@ -54,6 +54,41 @@ Exact runtime binary SHA-256:
 - CPU: `7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c`
 - CUDA T4: `3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0`
 
+### Policy attach model
+
+Mỗi Kaggle session dùng đúng một profile. Session `q8-reference` thông thường:
+
+```text
+Mage-Flow GGUF/q8-0
+Qwen GGUF dùng chung
+Mage-Flow VAE-only SafeTensors
+prebuilt runtime khớp profile
+```
+
+Session `bf16-high-memory-cpu` thông thường:
+
+```text
+Mage-Flow PyTorch/default BF16 transformer + VAE
+Qwen GGUF dùng chung
+prebuilt CPU runtime khớp profile
+```
+
+Session mixed:
+
+```text
+chỉ được phép cho benchmark/qualification có kiểm soát
+hai profile chạy tuần tự
+không bao giờ chạy hai inference process song song
+```
+
+Việc attach đồng thời Mage-Flow `GGUF / q8-0` và Mage-Flow `PyTorch / default` được phát hiện trong normal manifest discovery và fail closed trước khi hash model. Visual benchmark là ngoại lệ mixed duy nhất được khai báo tường minh.
+
+Nếu đổi từ Q8 sang BF16 (hoặc ngược lại):
+
+```text
+Detach model family không dùng, Restart Session, rồi Run All.
+```
+
 ## Canonical evidence đã đo
 
 | Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
