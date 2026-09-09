@@ -36,7 +36,7 @@ def render_summary(data: dict) -> str:
     lines = [
         "# v1.0.0 Strict 2x2 Native Benchmark",
         "",
-        "All four cells were generated from the same frozen release source and canonical request.",
+        "All four evidence cells share the same frozen release source and canonical request; per-resolution status below remains authoritative if a genuine later-resolution limit was recorded.",
         "Mage-Flow-Turbo inference is executed by the pinned native `stable-diffusion.cpp` `sd-cli` runtime.",
         "The BF16 SafeTensors profile is **not** a Hugging Face Transformers inference backend; SafeTensors describes the model artifact format/source distribution.",
         "",
