@@ -1,135 +1,116 @@
-# Qualification CPU nhiều RAM BF16
+# BF16 SafeTensors Release Profile và nghiên cứu CPU lịch sử
 
 > 🌐 Language / Ngôn ngữ: [English](BF16-HIGH-MEMORY-CPU.md) | **Tiếng Việt**
 
-Tài liệu này định nghĩa track qualification CPU BF16 dạng opt-in cho Mage-Flow-Turbo-Native-Inference. Track này không thay thế profile `q8-reference` đã đóng băng và không thay đổi contract benchmark CPU ↔ T4 của v1.0.0. BF16 là profile CPU high-memory dạng opt-in, experimental nhưng được support. Đã có real CPU evidence và benchmark paired 768×768, nhưng BF16 không thay thế profile canonical `q8-reference` và không được nâng lên default/release reference từ evidence này. Track qualification/publication BF16 đã đóng: không cần thêm matrix resolution BF16, test scaling nhiều core hoặc test ở resolution cao hơn cho closeout hiện tại của dự án.
+`bf16-safetensors` là profile BF16 được hỗ trợ cho Mage-Flow-Turbo-Native-Inference v1.0.0. Profile này dùng cùng native execution engine `stable-diffusion.cpp` `sd-cli` như `q8-reference`; nó **không** bổ sung Hugging Face Transformers hoặc PyTorch inference backend.
+
+Tên file tài liệu này được giữ lại để không làm gãy các link hiện có. Release contract CPU-only cũ đã bị supersede bởi strict v1.0.0 2×2 profile/backend matrix.
 
 ## Contract profile
 
-`bf16-high-memory-cpu` dùng một mirror Kaggle model duy nhất cho cả transformer lẫn VAE:
+`bf16-safetensors` dùng Mage-Flow-Turbo `PyTorch / default` mirror làm source distribution cho BF16 transformer và VAE:
 
 ```text
 mage-flow-community-mage-flow-turbo / PyTorch / default
 ```
 
-mirror này cung cấp cả hai file:
+Các component bắt buộc:
 
-- `transformer/diffusion_pytorch_model.safetensors`
-- `vae/diffusion_pytorch_model.safetensors`
+- Mage-Flow-Turbo transformer: BF16 SafeTensors, SHA-256 `6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d`.
+- Qwen3-VL-4B text encoder: GGUF `Q4_K_M`, SHA-256 `66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a`.
+- Mage VAE: SafeTensors, SHA-256 `34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0`.
+- Native runtime: pinned `stable-diffusion.cpp` commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba`.
+- Supported release backends: `cpu`, `cuda0`.
 
-Không cần input `pytorch/vae-only` riêng cho profile BF16.
+`PyTorch / default` chỉ mô tả upstream/mirror artifact layout. Inference vẫn chạy bằng native `sd-cli`.
 
-- Transformer Mage-Flow-Turbo: SafeTensors BF16 chính thức từ mirror `PyTorch / default` duy nhất, SHA-256 `6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d`.
-- Text encoder Qwen3-VL-4B: artifact GGUF `Q4_K_M` reference hiện tại.
-- Mage VAE: artifact SafeTensors reference hiện tại từ cùng mirror `PyTorch / default`.
-- Backend: chỉ `cpu`.
-- RAM hiển thị tối thiểu: 27 GiB.
-- Headroom runtime quan sát bắt buộc: `MemAvailable` tối thiểu 3 GiB trong canonical generation.
+## Policy CPU
 
-Profile fail-closed. CUDA, accelerator không hỗ trợ, RAM không đủ, thiếu telemetry, sai identity hoặc thiếu model artifact đều không được fallback về Q8.
+BF16 CPU qualification giữ các high-memory safety gates bảo thủ đã được thiết lập từ nghiên cứu trước:
 
-## Gate canonical đầu tiên
+- visible host RAM tối thiểu: 27 GiB;
+- `MemAvailable` headroom quan sát trong canonical run thành công: tối thiểu 3 GiB;
+- backend đúng `cpu`;
+- prebuilt CPU runtime SHA-256 `7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c`;
+- không accelerator fallback.
 
-Chỉ chạy đúng một generation 512×512 trước khi chạy matrix lớn hơn:
+Đây là release-safety gates cho qualification workflow đã test, không phải tuyên bố phổ quát rằng mọi BF16 use case đều cần đúng 27 GiB.
+
+## Policy CUDA0
+
+BF16 CUDA qualification là strict single-T4 path:
+
+- Kaggle T4 hoặc T4x2 host;
+- chỉ physical GPU slot 0;
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID`;
+- `CUDA_VISIBLE_DEVICES=0`;
+- effective backend `cuda0`;
+- không `cuda1`, multi-GPU split, `auto-fit`, hoặc CPU inference fallback;
+- prebuilt CUDA runtime SHA-256 `3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0`;
+- generation thành công phải có VRAM telemetry dương.
+
+CPU-only gate 27 GiB / 3 GiB không được dùng để reject CUDA backend. Host memory vẫn được ghi, nhưng CUDA feasibility được quyết định bởi native CUDA execution tường minh, artifact hợp lệ và VRAM evidence.
+
+## Strict release matrix
+
+Cho cả CPU và CUDA0, authority matrix chạy theo thứ tự:
+
+```text
+512x512 → 640x640 → 768x768 → 1024x1024
+prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
+seed    = 42
+steps   = 4
+CFG     = 1.0
+threads = 4
+```
+
+CPU command:
 
 ```bash
-python -m integrations.kaggle.qualification \
+python -m integrations.kaggle.qualification_matrix \
   --backend cpu \
-  --profile bf16-high-memory-cpu \
+  --profile bf16-safetensors \
   --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-bf16-qualification \
-  --repo-dir "$PWD"
+  --work-root /kaggle/working/v1-bf16-cpu \
+  --repo-dir "$PWD" \
+  --resolutions 512,640,768,1024
 ```
 
-Canonical request vẫn giữ seed 42, 4 steps, CFG 1.0, 4 threads và prompt cáo đỏ đã đóng băng. Evidence ghi exact model identities, runtime identity, tổng RAM, RAM khả dụng trước khi chạy, RAM khả dụng thấp nhất, peak RSS của `sd-cli`, elapsed time và PNG identity.
-
-Gate 1 512 đã chạy thành công trên phiên Kaggle CPU-only mới tại source HEAD `ee9119e8831558353dd514ef41fe867808e327b9`: model/runtime verification PASS, backend CPU, artifact là PNG 512×512 hợp lệ, `MemAvailable` thấp nhất quan sát được vẫn từ 3 GiB trở lên.
-
-## Matrix resolution tùy chọn cho nghiên cứu
-
-Matrix 512 → 640 → 768 → 1024 chỉ còn là công cụ cho nghiên cứu follow-up tùy chọn. Matrix này không bắt buộc cho closeout BF16, contract release v1.0.0 hoặc workflow fresh evidence production-demo Q8 canonical.
-
-Lệnh matrix resolve model, verify model artifact và verify runtime **đúng một lần cho mỗi tiến trình matrix**, sau đó chạy canonical request đã đóng băng tuần tự 512 → 640 → 768 → 1024:
+CUDA command trong fresh T4/T4x2 session sau khi set `CUDA_VISIBLE_DEVICES=0`:
 
 ```bash
 python -m integrations.kaggle.qualification_matrix \
-  --backend cpu \
-  --profile bf16-high-memory-cpu \
+  --backend cuda0 \
+  --profile bf16-safetensors \
   --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-bf16-matrix \
-  --repo-dir "$PWD"
+  --work-root /kaggle/working/v1-bf16-t4 \
+  --repo-dir "$PWD" \
+  --resolutions 512,640,768,1024
 ```
 
-Matrix chỉ là evidence qualification về feasibility, hành vi bộ nhớ, latency và artifact correctness; matrix **không phải release qualification** và không so sánh chất lượng hình ảnh. Chỉ width và height thay đổi giữa các lượt; prompt, seed, steps, CFG và threads bị đóng băng.
+Harness chạy tuần tự và fail-fast. Canonical 512 là feasibility gate đầu tiên. Nếu resolution phía sau gặp giới hạn resource/runtime thật, evidence được giữ nguyên; qualification path không được đổi sang CPU offload, multi-GPU, auto-fit hoặc backend khác chỉ để ép kết quả thành PASS.
 
-Matrix yêu cầu runtime CPU prebuilt tường minh qua `MAGE_CPU_PREBUILT_SD_CLI` và **không build từ source**. Setup chỉ chạy một lần: đo RAM, profile preflight, build manifest, verify manifest, resolve `sd-cli` prebuilt, verify runtime identity và SHA của binary. Setup timing telemetry được ghi riêng để phân biệt overhead verify artifact, overhead verify runtime và latency inference thật.
+## Semantics của release evidence
 
-Fail-fast RAM policy được giữ nguyên: RAM hiển thị tối thiểu 27 GiB và `MemAvailable` tối thiểu quan sát được 3 GiB. Nếu headroom xuống dưới 3 GiB, resolution hiện tại bị ghi là failed, partial evidence được ghi và matrix dừng ngay; không chạy resolution nào sau đó. Matrix 640/768/1024 phải có evidence thật trước khi công bố bất kỳ so sánh timing hoặc bộ nhớ giữa các resolution.
+Mỗi matrix ghi source HEAD/TREE, exact model/runtime identities, profile/backend, canonical request, elapsed time, host memory/RSS, CUDA peak VRAM khi áp dụng, PNG identity và failure classification tường minh.
 
-## Acceptance
+Bốn release cells được independent review rồi mới đưa vào frozen four-cell comparator. Ratio chỉ được tính khi các record liên quan thành công và tất cả identity/comparability gates đều PASS.
 
-Gate 512×512 chỉ được chấp nhận khi model/runtime verification PASS, `sd-cli` thoát thành công, PNG hợp lệ, backend được chọn là CPU và minimum available memory quan sát được vẫn từ 3 GiB trở lên.
+Q8 vẫn là canonical/default profile. Việc hỗ trợ BF16 như một release profile không có nghĩa dự án tuyên bố BF16 luôn có chất lượng cao hơn hoặc hiệu quả hơn Q8.
 
-Đã có real BF16 CPU evidence và track qualification/publication BF16 đã đóng. Tuy vậy profile vẫn là opt-in và experimental: benchmark paired 768×768 đã hoàn tất không chứng minh lợi thế hình ảnh vượt trội nhất quán đủ để thay Q8 làm profile canonical/default. Fresh matrix Q8-vs-BF16 512 → 640 → 768 → 1024 không còn là gate còn thiếu; chỉ chạy nếu sau này chủ động mở một nghiên cứu BF16 mới với scope tách biệt.
+## Historical pre-release CPU visual research
 
-## Nghiên cứu tùy chọn so sánh Q8 và BF16 trên cùng CPU
+Trước strict 2×2 redesign, dự án đã có một same-host paired 768×768 CPU visual study giữa Q8 và BF16:
 
-Nếu sau này chủ động mở một nghiên cứu CPU cùng máy với scope tách biệt, chạy cả hai matrix trong cùng một session trên cùng một host, cùng `sd-cli` prebuilt, cùng source HEAD, cùng request đóng băng (seed 42, 4 steps, CFG 1.0, 4 threads, prompt fox) và cùng dải resolution 512 → 640 → 768 → 1024. Dùng hai work root sạch riêng biệt và không chạy đồng thời. Quy trình này chỉ là nghiên cứu tùy chọn; không phải gate BF16 còn chờ, không thuộc contract release v1.0.0 và không thuộc workflow fresh evidence production-demo Q8 canonical:
+- 10 prompt × 2 representations = 20 runs;
+- 4 steps, CFG 1.0, 4 CPU threads;
+- 20/20 runs thành công;
+- Q8 mean elapsed ≈ 640,0 s/hình;
+- BF16 mean elapsed ≈ 1013,9 s/hình;
+- Q8 peak `sd-cli` RSS ≈ 8,89 GB;
+- BF16 peak `sd-cli` RSS ≈ 12,54 GB;
+- blind visual result: BF16 4 win, Q8 3 win, 3 tie, chỉ một BF16 win rõ ràng về mặt vật chất.
 
-```bash
-python -m integrations.kaggle.qualification_matrix \
-  --backend cpu --profile q8-reference \
-  --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-q8-matrix-paired \
-  --repo-dir "$PWD"
-```
+Nghiên cứu đó vẫn hữu ích cho quality-oriented research nhưng **không** phải final v1.0.0 strict 2×2 performance authority, không dùng final redesigned source HEAD và không được thay thế bất kỳ fresh release qualification cell nào.
 
-```bash
-python -m integrations.kaggle.qualification_matrix \
-  --backend cpu --profile bf16-high-memory-cpu \
-  --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-bf16-matrix-paired \
-  --repo-dir "$PWD"
-```
-
-Matrix harness chỉ hỗ trợ CPU và từ chối mọi backend không phải `cpu` trước khi resolve model hoặc generation. Cả profile `q8-reference` lẫn `bf16-high-memory-cpu` dùng chung một `sd-cli` CPU prebuilt; không build từ source, không CMake, không biên dịch.
-
-Mỗi profile ghi record theo từng resolution gồm `mem_available_before_run_kb` mới lấy ngay trước generation, `mem_available_after_run_kb` (tuỳ chọn, ghi sau khi child process thoát), `minimum_mem_available_kb`, `peak_sd_cli_rss_kb`, `elapsed_ms` và identity của artifact. Aggregate giữ snapshot `setup.mem_available_before_kb` riêng ở mức matrix.
-
-Sau khi cả hai matrix PASS, so sánh evidence offline mà không chạy inference:
-
-```bash
-python -m integrations.kaggle.compare_matrix_evidence \
-  --q8-aggregate  /kaggle/working/mageflow-q8-matrix-paired/output/qualification-matrix-q8-reference-cpu.json \
-  --bf16-aggregate /kaggle/working/mageflow-bf16-matrix-paired/output/qualification-matrix-bf16-high-memory-cpu-cpu.json \
-  --output /kaggle/working/mageflow-q8-vs-bf16-comparison/comparison-q8-vs-bf16-cpu.json
-```
-
-Utility so sánh xác minh tính có thể so sánh (cùng source HEAD, backend CPU, SHA và commit runtime, dải resolution, prompt, seed, steps, CFG, threads, SHA text encoder và SHA VAE, cùng identity diffusion Q8 và BF16) trước khi tính tỷ lệ elapsed và RSS. Nếu bất kỳ gate nào fail nó báo `COMPARABILITY=FAIL` và không xuất bản tỷ lệ hiệu năng gây hiểu lầm.
-
-Kết quả này chỉ báo cáo **evidence nghiên cứu so sánh CPU cùng máy**. Profile BF16 thử nghiệm và profile Q8 reference chỉ được so sánh về latency và bộ nhớ; kết quả không phải release qualification, không khẳng định chất lượng hình ảnh vượt trội, và không được mô tả như bằng chứng yêu cầu tối thiểu 27 GiB cho matrix 1024 đầy đủ.
-
-## Qualification paired 768×768 đã hoàn tất
-
-Một qualification visual paired cùng máy đã hoàn tất và được đóng băng:
-
-- 10 prompt × 2 profile = 20 canonical run;
-- cùng một CPU host;
-- cùng prompt/seed cho mỗi cặp;
-- CPU, 768×768, 4 steps, CFG 1.0, 4 threads;
-- runtime/model identity chính xác được đóng băng;
-- 20/20 thành công, 10/10 cặp hoàn tất, 0 failure;
-- benchmark `visual-q8-vs-bf16-768-10p`, benchmark source head `e84db748f8d140d4a781c85739a18da5a50c8d35`;
-- SHA-256 archive evidence cuối `9036186260441fd353b8d32f7b584fdb8bdc4b345d18e8b4a9008983eb33e04d`;
-- Q8 mean elapsed ≈ 640,0 s/hình ≈ 10,67 phút/hình; BF16 mean elapsed ≈ 1013,9 s/hình ≈ 16,90 phút/hình;
-- Q8 peak `sd-cli` RSS ≈ 8,89 GB; BF16 peak `sd-cli` RSS ≈ 12,54 GB;
-- blind visual review: BF16 4 win, Q8 3 win, 3 tie (1 win vật chất rõ ràng của BF16);
-- quyết định: Q8 vẫn canonical/default; BF16 vẫn là profile opt-in experimental high-memory được support.
-
-Đây là kết quả trên Kaggle CPU host đã test với `threads=4`, không phải con số hiệu năng phổ quát.
-
-Đây không phải qualification scaling 512→1024.
-Không khẳng định scaling 8/16/32/64 vCPU.
-Không khẳng định resolution cao hơn làm BF16 thắng Q8.
-
-Người dùng có nhiều CPU/RAM hơn có thể thử BF16 ở resolution cao hơn, nhưng phải tự benchmark host của mình.
+Fresh final performance numbers chỉ được tạo sau new source freeze và được publish trong checksum-protected GitHub Release assets/body thay vì sửa ngược vào source documentation.
