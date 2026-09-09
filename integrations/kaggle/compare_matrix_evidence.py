@@ -17,6 +17,7 @@ SHARED_TEXT_ENCODER_SHA256 = (
     "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a"
 )
 SHARED_VAE_SHA256 = "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+ALLOWED_T4_NAMES = {"Tesla T4", "NVIDIA T4", "NVIDIA Tesla T4"}
 CELL_KEYS = ("q8_cpu", "bf16_cpu", "q8_cuda0", "bf16_cuda0")
 _EXPECTED_CELL = {
     "q8_cpu": (Q8_PROFILE, "cpu"),
@@ -65,6 +66,33 @@ def _model_sha(data: dict, role: str) -> str | None:
     return ((data.get("models") or {}).get(role) or {}).get("sha256")
 
 
+def _validate_t4_session(label: str, data: dict) -> list[str]:
+    errors: list[str] = []
+    session = data.get("session") or {}
+    if session.get("cuda_device_order") != "PCI_BUS_ID":
+        errors.append(f"{label}: CUDA_DEVICE_ORDER must be PCI_BUS_ID")
+    if session.get("cuda_visible_devices") != "0":
+        errors.append(f"{label}: CUDA_VISIBLE_DEVICES must be 0")
+
+    physical_gpus = session.get("physical_gpus")
+    if not isinstance(physical_gpus, list) or len(physical_gpus) not in (1, 2):
+        errors.append(f"{label}: physical_gpus must describe T4 or T4x2")
+    else:
+        indices = [gpu.get("index") for gpu in physical_gpus if isinstance(gpu, dict)]
+        names = [gpu.get("name") for gpu in physical_gpus if isinstance(gpu, dict)]
+        if len(indices) != len(physical_gpus) or indices != list(range(len(physical_gpus))):
+            errors.append(f"{label}: physical GPU indices are invalid")
+        if len(names) != len(physical_gpus) or any(name not in ALLOWED_T4_NAMES for name in names):
+            errors.append(f"{label}: physical GPU identity is not T4/T4x2")
+
+    devices = str((data.get("runtime") or {}).get("devices") or "").lower()
+    if "cuda0" not in devices:
+        errors.append(f"{label}: runtime devices did not expose cuda0")
+    if "cuda1" in devices:
+        errors.append(f"{label}: runtime devices must not expose cuda1")
+    return errors
+
+
 def _validate_cell(label: str, data: dict) -> list[str]:
     errors: list[str] = []
     expected_profile, expected_backend = _EXPECTED_CELL[label]
@@ -111,9 +139,7 @@ def _validate_cell(label: str, data: dict) -> list[str]:
             errors.append(f"{label}: canonical 512 record must pass")
 
     if expected_backend == "cuda0":
-        session = data.get("session") or {}
-        if session.get("cuda_visible_devices") != "0":
-            errors.append(f"{label}: CUDA_VISIBLE_DEVICES must be 0")
+        errors.extend(_validate_t4_session(label, data))
         for record in matrix:
             if record.get("status") == "passed":
                 gpu_peak = record.get("gpu_peak_mib")
