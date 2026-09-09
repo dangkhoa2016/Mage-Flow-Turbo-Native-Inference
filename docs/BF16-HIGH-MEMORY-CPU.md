@@ -1,135 +1,116 @@
-# BF16 High-Memory CPU Qualification
+# BF16 SafeTensors Release Profile and Historical CPU Research
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](BF16-HIGH-MEMORY-CPU.vi.md)
 
-This document defines the opt-in BF16 CPU qualification track for Mage-Flow-Turbo-Native-Inference. It does not replace the frozen `q8-reference` profile and does not change the v1.0.0 CPU ↔ T4 benchmark contract. The BF16 profile is a supported, opt-in, experimental high-memory CPU profile. Real CPU qualification and paired 768×768 visual benchmark evidence now exist, but BF16 does not replace the canonical `q8-reference` profile and is not promoted to the default/release reference by this evidence. The BF16 qualification/publication track is closed: no additional BF16 resolution matrix, many-core scaling, or higher-resolution testing is required for the current project closeout.
+`bf16-safetensors` is the supported BF16 model profile for Mage-Flow-Turbo-Native-Inference v1.0.0. It uses the same native `stable-diffusion.cpp` `sd-cli` execution engine as `q8-reference`; it does **not** introduce a Hugging Face Transformers or PyTorch inference backend.
+
+The filename of this document is retained for link stability. The former CPU-only release contract is superseded by the strict v1.0.0 2×2 profile/backend matrix.
 
 ## Profile contract
 
-`bf16-high-memory-cpu` uses a single Kaggle model mirror for both the transformer and the VAE:
+`bf16-safetensors` uses the Mage-Flow-Turbo `PyTorch / default` mirror as the source distribution for the BF16 transformer and VAE:
 
 ```text
 mage-flow-community-mage-flow-turbo / PyTorch / default
 ```
 
-which provides both:
+Required components:
 
-- `transformer/diffusion_pytorch_model.safetensors`
-- `vae/diffusion_pytorch_model.safetensors`
+- Mage-Flow-Turbo transformer: BF16 SafeTensors, SHA-256 `6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d`.
+- Qwen3-VL-4B text encoder: GGUF `Q4_K_M`, SHA-256 `66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a`.
+- Mage VAE: SafeTensors, SHA-256 `34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0`.
+- Native runtime: pinned `stable-diffusion.cpp` commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba`.
+- Supported release backends: `cpu`, `cuda0`.
 
-No separate `pytorch/vae-only` input is required for the BF16 profile.
+`PyTorch / default` describes the upstream/mirror artifact layout only. Inference still runs through native `sd-cli`.
 
-- Mage-Flow-Turbo transformer: official BF16 SafeTensors from the single `PyTorch / default` mirror, SHA-256 `6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d`.
-- Qwen3-VL-4B text encoder: existing `Q4_K_M` GGUF reference artifact.
-- Mage VAE: existing SafeTensors reference artifact from the same `PyTorch / default` mirror.
-- Backend: `cpu` only.
-- Minimum visible RAM: 27 GiB.
-- Required observed runtime headroom: at least 3 GiB `MemAvailable` during the canonical generation.
+## CPU policy
 
-The profile fails closed. CUDA, unsupported accelerators, insufficient RAM, missing telemetry, identity mismatches, and missing model artifacts do not fall back to Q8.
+BF16 CPU qualification keeps the conservative high-memory safety gates established by earlier research:
 
-## Canonical first gate
+- minimum visible host RAM: 27 GiB;
+- required observed `MemAvailable` headroom during a successful canonical run: at least 3 GiB;
+- backend exactly `cpu`;
+- prebuilt CPU runtime SHA-256 `7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c`;
+- no accelerator fallback.
 
-Run exactly one 512×512 generation before any larger matrix:
+These are release-safety gates for the tested qualification workflow, not a universal claim that every BF16 use case inherently needs exactly 27 GiB.
+
+## CUDA0 policy
+
+BF16 CUDA qualification is a strict single-T4 path:
+
+- Kaggle T4 or T4x2 host;
+- physical GPU slot 0 only;
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID`;
+- `CUDA_VISIBLE_DEVICES=0`;
+- effective backend `cuda0`;
+- no `cuda1`, multi-GPU split, `auto-fit`, or CPU inference fallback;
+- prebuilt CUDA runtime SHA-256 `3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0`;
+- successful generations require positive VRAM telemetry.
+
+The CPU-only 27 GiB / 3 GiB headroom gate is not reused as a CUDA backend rejection. Host memory is still recorded, but CUDA feasibility is determined by the explicit native CUDA execution, artifact validity and VRAM evidence.
+
+## Strict release matrix
+
+For both CPU and CUDA0, the ordered authority matrix is:
+
+```text
+512x512 → 640x640 → 768x768 → 1024x1024
+prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
+seed    = 42
+steps   = 4
+CFG     = 1.0
+threads = 4
+```
+
+Run with the dedicated matrix harness:
 
 ```bash
-python -m integrations.kaggle.qualification \
+python -m integrations.kaggle.qualification_matrix \
   --backend cpu \
-  --profile bf16-high-memory-cpu \
+  --profile bf16-safetensors \
   --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-bf16-qualification \
-  --repo-dir "$PWD"
+  --work-root /kaggle/working/v1-bf16-cpu \
+  --repo-dir "$PWD" \
+  --resolutions 512,640,768,1024
 ```
 
-The canonical request remains seed 42, 4 steps, CFG 1.0, 4 threads and the frozen fox prompt. Evidence records exact model identities, runtime identity, total RAM, pre-run available RAM, minimum available RAM, peak `sd-cli` RSS, elapsed time and PNG identity.
-
-Gate 1 512 has run successfully on a fresh CPU-only Kaggle session at source HEAD `ee9119e8831558353dd514ef41fe867808e327b9`: model/runtime verification passed, CPU backend, artifact is a valid 512×512 PNG, minimum observed `MemAvailable` stayed at or above 3 GiB.
-
-## Optional resolution matrix research
-
-The 512 → 640 → 768 → 1024 matrix remains available only for optional follow-up research. It is not required for BF16 closeout, the v1.0.0 release contract, or the canonical fresh Q8 production-demo evidence workflow.
-
-The matrix command resolves models, verifies model artifacts and verifies the runtime **once per matrix process**, then runs the frozen canonical request sequentially at 512 → 640 → 768 → 1024:
+or, in a fresh T4/T4x2 session with `CUDA_VISIBLE_DEVICES=0`:
 
 ```bash
 python -m integrations.kaggle.qualification_matrix \
-  --backend cpu \
-  --profile bf16-high-memory-cpu \
+  --backend cuda0 \
+  --profile bf16-safetensors \
   --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-bf16-matrix \
-  --repo-dir "$PWD"
+  --work-root /kaggle/working/v1-bf16-t4 \
+  --repo-dir "$PWD" \
+  --resolutions 512,640,768,1024
 ```
 
-The matrix is qualification evidence for feasibility, memory behavior, latency and artifact correctness; it is **not release qualification** and performs no visual-quality comparison. Only width and height change between runs; prompt, seed, steps, CFG and threads are frozen.
+The harness is sequential and fail-fast. Canonical 512 is the first feasibility gate. If a later resolution hits a genuine runtime/resource limit, that limit is preserved in evidence; the qualification path must not switch to CPU offload, multi-GPU, auto-fit or another backend merely to force a pass.
 
-The matrix requires an explicit prebuilt CPU runtime via `MAGE_CPU_PREBUILT_SD_CLI` and **no source build**. Setup runs once: RAM probe, profile preflight, manifest build, manifest verification, prebuilt `sd-cli` resolution, runtime identity and binary SHA verification. Setup timing telemetry is recorded separately so artifact-verification overhead, runtime-verification overhead and inference latency can be distinguished.
+## Release evidence semantics
 
-Fail-fast RAM policy: the BF16 minimum visible RAM of 27 GiB and the 3 GiB minimum observed `MemAvailable` are retained. If headroom falls below 3 GiB, the current resolution is recorded as failed, partial evidence is written and the matrix stops immediately; no later resolution runs. The 640/768/1024 matrix must produce real evidence before any cross-resolution timing or memory claims are published.
+Each matrix records source HEAD/TREE, exact model/runtime identities, profile/backend, canonical request, elapsed time, host memory/RSS, CUDA peak VRAM when applicable, PNG identity and explicit failure classification.
 
-## Acceptance
+The four release cells are independently reviewed and then compared by the frozen four-cell comparator. Ratios are calculated only when the relevant records are individually successful and all identity/comparability gates pass.
 
-The 512×512 gate is accepted only when model and runtime verification pass, `sd-cli` exits successfully, the PNG is valid, CPU is the selected backend, and minimum observed available memory remains at or above 3 GiB.
+Q8 remains the canonical/default profile. Supporting BF16 as a release profile does not assert that BF16 is universally higher quality or more efficient.
 
-Real BF16 CPU evidence exists and the BF16 qualification/publication track is closed. The profile nevertheless remains opt-in and experimental: the completed 768×768 paired benchmark did not demonstrate a consistently material visual advantage sufficient to replace Q8 as the canonical/default profile. A fresh 512 → 640 → 768 → 1024 Q8-versus-BF16 matrix is not a remaining gate; it may be run only if a future, separately scoped BF16 research study is intentionally opened.
+## Historical pre-release CPU visual research
 
-## Optional paired Q8 versus BF16 CPU research
+Before the strict 2×2 redesign, a same-host paired 768×768 CPU visual study compared Q8 and BF16:
 
-If a future, separately scoped same-host CPU research study is intentionally opened, run both matrices in the same session on the same host, with the same prebuilt `sd-cli`, the same source HEAD, the same frozen request (seed 42, 4 steps, CFG 1.0, 4 threads, fox prompt) and the same resolution list 512 → 640 → 768 → 1024. Use separate clean work roots and never run the two matrices concurrently. This procedure is optional research only; it is not a pending BF16 qualification gate, not part of the v1.0.0 release contract, and not part of the canonical fresh Q8 production-demo evidence workflow:
+- 10 prompts × 2 representations = 20 runs;
+- 4 steps, CFG 1.0, 4 CPU threads;
+- 20/20 runs succeeded;
+- Q8 mean elapsed ≈ 640.0 s/image;
+- BF16 mean elapsed ≈ 1013.9 s/image;
+- Q8 peak `sd-cli` RSS ≈ 8.89 GB;
+- BF16 peak `sd-cli` RSS ≈ 12.54 GB;
+- blind visual result: BF16 4 wins, Q8 3 wins, 3 ties, with only one materially clear BF16 win.
 
-```bash
-python -m integrations.kaggle.qualification_matrix \
-  --backend cpu --profile q8-reference \
-  --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-q8-matrix-paired \
-  --repo-dir "$PWD"
-```
+That study remains historical quality-oriented research. It is **not** the final v1.0.0 strict 2×2 performance authority, does not use the final redesigned source HEAD, and must not be substituted for any of the four fresh release qualification cells.
 
-```bash
-python -m integrations.kaggle.qualification_matrix \
-  --backend cpu --profile bf16-high-memory-cpu \
-  --input-root /kaggle/input \
-  --work-root /kaggle/working/mageflow-bf16-matrix-paired \
-  --repo-dir "$PWD"
-```
-
-The matrix harness is CPU-only and rejects any non-`cpu` backend before model resolution or generation. Both the `q8-reference` and `bf16-high-memory-cpu` profiles consume the same prebuilt CPU `sd-cli`; no source build, no CMake and no compilation.
-
-Each profile writes a per-resolution record that includes a fresh `mem_available_before_run_kb` sample taken immediately before generation, an optional `mem_available_after_run_kb` recorded after the child process exits, `minimum_mem_available_kb`, `peak_sd_cli_rss_kb`, `elapsed_ms` and artifact identity. The aggregate keeps a separate matrix-level `setup.mem_available_before_kb` snapshot.
-
-After both matrices pass, compare evidence offline without running inference:
-
-```bash
-python -m integrations.kaggle.compare_matrix_evidence \
-  --q8-aggregate  /kaggle/working/mageflow-q8-matrix-paired/output/qualification-matrix-q8-reference-cpu.json \
-  --bf16-aggregate /kaggle/working/mageflow-bf16-matrix-paired/output/qualification-matrix-bf16-high-memory-cpu-cpu.json \
-  --output /kaggle/working/mageflow-q8-vs-bf16-comparison/comparison-q8-vs-bf16-cpu.json
-```
-
-The comparison utility verifies comparability (same source HEAD, CPU backend, runtime SHA and commit, resolution list, prompt, seed, steps, CFG, threads, text encoder SHA and VAE SHA, plus the expected Q8 and BF16 diffusion identities) before computing elapsed and RSS ratios. If any gate fails it reports `COMPARABILITY=FAIL` and emits no misleading performance ratios.
-
-This comparison reports **same-host CPU research comparison** evidence only. The experimental BF16 profile and the Q8 reference profile are compared on latency and memory; the result is not a release qualification, does not claim visual superiority, and must not be described as proof of a minimum 27 GiB requirement for a full 1024 matrix.
-
-## Completed 768×768 paired visual qualification
-
-A same-host paired visual qualification has been completed and frozen:
-
-- 10 prompts × 2 profiles = 20 canonical runs;
-- same CPU host;
-- same prompt/seed per pair;
-- CPU, 768×768, 4 steps, CFG 1.0, 4 threads;
-- exact runtime/model identities frozen;
-- 20/20 succeeded, 10/10 pairs complete, 0 failures;
-- benchmark `visual-q8-vs-bf16-768-10p`, benchmark source head `e84db748f8d140d4a781c85739a18da5a50c8d35`;
-- final evidence archive SHA-256 `9036186260441fd353b8d32f7b584fdb8bdc4b345d18e8b4a9008983eb33e04d`;
-- Q8 mean elapsed ≈ 640.0 s/image ≈ 10.67 min/image; BF16 mean elapsed ≈ 1013.9 s/image ≈ 16.90 min/image;
-- Q8 peak `sd-cli` RSS ≈ 8.89 GB; BF16 peak `sd-cli` RSS ≈ 12.54 GB;
-- blind visual result: BF16 4 wins, Q8 3 wins, 3 ties (1 materially clear BF16 win);
-- decision: Q8 remains canonical/default; BF16 remains a supported opt-in experimental high-memory profile.
-
-These are results on the tested Kaggle CPU host with `threads=4`, not universal performance numbers.
-
-This is not a 512→1024 scaling qualification.
-No 8/16/32/64-vCPU scaling claim is made.
-No higher-resolution BF16 quality advantage is claimed.
-
-Users with more CPU/RAM may experiment with BF16 at higher resolutions, but must benchmark their own host.
+Fresh final performance numbers are generated only after the new source freeze and are published in checksum-protected GitHub Release assets/body rather than edited back into source documentation.
