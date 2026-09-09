@@ -17,11 +17,11 @@ from mageflow_native.constants import (
 )
 from mageflow_native.models.manifest import load_manifest, verify_manifest
 from mageflow_native.runtime.manager import RuntimeManager
-from mageflow_native.runtime.spec import BackendSpec, RuntimeBuildBackend
+from mageflow_native.runtime.spec import BackendSpec
 from mageflow_native.telemetry import read_mem_available_kb
 from integrations.kaggle.input_adapter import build_kaggle_manifest
 from integrations.kaggle.profiles import (
-    BF16_HIGH_MEMORY_CPU_PROFILE,
+    BF16_SAFETENSORS_PROFILE,
     Q8_REFERENCE_PROFILE,
     validate_profile_environment,
     validate_profile_result,
@@ -75,19 +75,18 @@ def run_qualification(
     manifest_with_root = load_manifest(manifest_path, model_root=input_root)
     verified = verify_manifest(manifest_with_root)
 
-    runtime_root = kaggle_cache_root()
     sd_cli_hint = runtime_hint(backend)
-    manager = RuntimeManager(runtime_root, explicit_sd_cli=sd_cli_hint)
-
-    if backend == "cuda0":
-        if not sd_cli_hint:
-            print("building pinned CUDA runtime from source...", flush=True)
-            sd_cli = manager.build(RuntimeBuildBackend("cuda"))
-        else:
-            sd_cli = Path(sd_cli_hint)
-    else:
-        sd_cli = manager.resolve()
-
+    if not sd_cli_hint:
+        env_name = (
+            "MAGE_CPU_PREBUILT_SD_CLI"
+            if backend == "cpu"
+            else "MAGE_CUDA_PREBUILT_SD_CLI"
+        )
+        raise FileNotFoundError(
+            f"prebuilt runtime is required for {backend}; set {env_name}"
+        )
+    sd_cli = Path(sd_cli_hint)
+    manager = RuntimeManager(kaggle_cache_root(), explicit_sd_cli=str(sd_cli))
     identity = manager.verify(sd_cli, requested_backend=backend)
 
     from mageflow_native.inference.runner import run_generation
@@ -124,6 +123,7 @@ def run_qualification(
 
     validate_profile_result(
         profile,
+        backend=backend,
         minimum_mem_available_kb=result.minimum_mem_available_kb,
     )
 
@@ -182,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=["cpu", "cuda0"], required=True)
     parser.add_argument(
         "--profile",
-        choices=[Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE],
+        choices=[Q8_REFERENCE_PROFILE, BF16_SAFETENSORS_PROFILE],
         default=Q8_REFERENCE_PROFILE,
     )
     parser.add_argument("--input-root", default="/kaggle/input")
