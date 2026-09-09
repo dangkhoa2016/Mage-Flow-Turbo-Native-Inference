@@ -39,7 +39,9 @@ jobs:
       - name: Publication surface audit
         run: python3 scripts/publication/audit_public_surface.py --root .
       - name: Public history invariants
-        run: python3 scripts/publication/verify_history.py . --branch HEAD
+        env:
+          PUBLIC_HISTORY_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/publication/verify_history.py . --branch "$PUBLIC_HISTORY_REF"
       - name: Release contract audit
         run: python3 scripts/publication/audit_release_contract.py
       - name: No model weights in Git tree
