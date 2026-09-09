@@ -13,8 +13,9 @@ from mageflow_native.constants import (
 
 Q8_REFERENCE_PROFILE = "q8-reference"
 BF16_SAFETENSORS_PROFILE = "bf16-safetensors"
-# Backward-compatible symbol only; the canonical profile value is bf16-safetensors.
-BF16_HIGH_MEMORY_CPU_PROFILE = BF16_SAFETENSORS_PROFILE
+# Historical compatibility identifier used by pre-redesign visual-research manifests.
+# New release qualification, docs and assets use BF16_SAFETENSORS_PROFILE only.
+BF16_HIGH_MEMORY_CPU_PROFILE = "bf16-high-memory-cpu"
 BF16_MIN_RAM_KB = 27 * 1024 * 1024
 BF16_MIN_HEADROOM_KB = 3 * 1024 * 1024
 BF16_TRANSFORMER_FILENAME = "diffusion_pytorch_model.safetensors"
@@ -64,6 +65,20 @@ _BF16_VAE = ComponentProfile(
     format="safetensors",
     required_fragment=MAGE_PYTORCH_DEFAULT_FRAGMENT,
 )
+_BF16_PROFILE = ModelProfile(
+    name=BF16_SAFETENSORS_PROFILE,
+    diffusion=ComponentProfile(
+        filename=BF16_TRANSFORMER_FILENAME,
+        sha256=BF16_TRANSFORMER_SHA256,
+        format="safetensors",
+        quantization=None,
+        required_fragment=MAGE_PYTORCH_DEFAULT_FRAGMENT,
+    ),
+    text_encoder=_QWEN,
+    vae=_BF16_VAE,
+    allowed_backends=("cpu", "cuda0"),
+    min_ram_kb=BF16_MIN_RAM_KB,
+)
 
 _PROFILES = {
     Q8_REFERENCE_PROFILE: ModelProfile(
@@ -79,20 +94,8 @@ _PROFILES = {
         vae=_Q8_VAE,
         allowed_backends=("cpu", "cuda0"),
     ),
-    BF16_SAFETENSORS_PROFILE: ModelProfile(
-        name=BF16_SAFETENSORS_PROFILE,
-        diffusion=ComponentProfile(
-            filename=BF16_TRANSFORMER_FILENAME,
-            sha256=BF16_TRANSFORMER_SHA256,
-            format="safetensors",
-            quantization=None,
-            required_fragment=MAGE_PYTORCH_DEFAULT_FRAGMENT,
-        ),
-        text_encoder=_QWEN,
-        vae=_BF16_VAE,
-        allowed_backends=("cpu", "cuda0"),
-        min_ram_kb=BF16_MIN_RAM_KB,
-    ),
+    BF16_SAFETENSORS_PROFILE: _BF16_PROFILE,
+    BF16_HIGH_MEMORY_CPU_PROFILE: _BF16_PROFILE,
 }
 
 
