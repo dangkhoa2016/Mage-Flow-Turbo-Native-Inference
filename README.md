@@ -1,133 +1,94 @@
 # Mage-Flow-Turbo-Native-Inference
 
 [![CI](https://github.com/dangkhoa2016/Mage-Flow-Turbo-Native-Inference/actions/workflows/ci.yml/badge.svg)](https://github.com/dangkhoa2016/Mage-Flow-Turbo-Native-Inference/actions/workflows/ci.yml)
+[![Native Runtime](https://github.com/dangkhoa2016/Mage-Flow-Turbo-Native-Inference/actions/workflows/native-runtime.yml/badge.svg)](https://github.com/dangkhoa2016/Mage-Flow-Turbo-Native-Inference/actions/workflows/native-runtime.yml)
+[![Release](https://img.shields.io/github/v/release/dangkhoa2016/Mage-Flow-Turbo-Native-Inference)](https://github.com/dangkhoa2016/Mage-Flow-Turbo-Native-Inference/releases/tag/v1.0.0)
 [![License](https://img.shields.io/github/license/dangkhoa2016/Mage-Flow-Turbo-Native-Inference)](LICENSE)
-![Linux CPU](https://img.shields.io/badge/Linux%20CPU-qualification%20pending-yellow)
-![NVIDIA CUDA](https://img.shields.io/badge/NVIDIA%20CUDA-qualification%20pending-yellow)
-![Kaggle](https://img.shields.io/badge/Kaggle-adapter%2Freference-20BEFF?logo=kaggle&logoColor=white)
 
 > 🌐 Language / Ngôn ngữ: **English** | [Tiếng Việt](README.vi.md)
 
-A **portable native inference and deployment stack for Mage-Flow-Turbo**. This is not a new model and it does not train or fine-tune anything. Python provides configuration, validation, CLI/REST orchestration, lifecycle control and evidence collection; the actual model inference is executed by the native `stable-diffusion.cpp` `sd-cli` runtime.
-
-**What actually runs:**
+A **portable native inference and deployment stack for Mage-Flow-Turbo**. The project does not train or modify model weights. Python provides configuration, validation, CLI/REST orchestration, lifecycle control and evidence collection; model inference is executed by the native `stable-diffusion.cpp` `sd-cli` runtime.
 
 ```text
-manifest → SHA-256 verification → runtime manager (sd-cli)
-        → Mage-Flow-Turbo DiT (Q8_0) with Qwen3-VL-4B text encoder and dedicated VAE
-        → Linux CPU or NVIDIA CUDA (cuda0)
-        → PNG artifact
+manifest → SHA-256 verification → pinned sd-cli runtime
+        → Mage-Flow-Turbo DiT Q8_0
+        → Qwen3-VL-4B text encoder Q4_K_M
+        → dedicated VAE
+        → Linux CPU or NVIDIA CUDA cuda0
+        → PNG artifact + structured evidence
 ```
 
-## Exact model stack
+## Exact reference stack
 
-| Role | Exact artifact | Format / quantization | Reference source |
-|---|---|---|---|
-| Diffusion model | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 | `mage-flow-community-mage-flow-turbo/gguf/q8-0` |
-| Text encoder / LLM | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | GGUF Q4_K_M | `qwen-qwen3-vl-4b-instruct-gguf/gguf/q4-k-m` |
-| VAE | `diffusion_pytorch_model.safetensors` | SafeTensors | `mage-flow-community-mage-flow-turbo/pytorch/vae-only` |
-| Native engine | `stable-diffusion.cpp` `sd-cli` | C/C++ native | pinned commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
+| Role | Exact artifact | Format / quantization |
+|---|---|---|
+| Diffusion model | `Mage-Flow-Turbo-DiT-Q8_0.gguf` | GGUF Q8_0 |
+| Text encoder | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | GGUF Q4_K_M |
+| VAE | `diffusion_pytorch_model.safetensors` | SafeTensors |
+| Native runtime | `stable-diffusion.cpp` `sd-cli` | pinned commit `6b3edaaf32cc19e5bb2d819c788bd557eddc8eba` |
 
-All three model components are required. Frozen SHA-256 identities and the pinned runtime are verified before any real inference. **Python is orchestration, not the denoising engine** — there is no PyTorch/Transformers inference loop.
+Frozen SHA-256 identities are enforced before real inference. The repository contains no model weights.
 
-## Why this project exists
+## v1.0.0 qualification scope
 
-The community value is a reproducible answer to a deployment problem:
+| Environment | Backend | Qualification role |
+|---|---|---|
+| Linux x86-64 | CPU | required release target |
+| Linux + NVIDIA GPU | CUDA `cuda0` | required release target |
+| Kaggle Accelerator=None | auto-selected CPU | production/evidence integration target |
+| Kaggle NVIDIA T4/T4x2 | auto-selected CUDA `cuda0` on physical GPU 0 | production/evidence integration target |
 
-- which Mage-Flow-Turbo components must be loaded;
-- which quantizations are known-good;
-- how the DiT, text encoder and VAE wire into `stable-diffusion.cpp`;
-- how to verify exact model identities before inference;
-- how to run the same stack on CPU or NVIDIA CUDA without a PyTorch inference loop;
-- how to expose it through a local CLI and REST API;
-- how to collect reproducible runtime/evidence data;
-- how to adapt the same generic core to Kaggle without embedding Kaggle assumptions into the core.
+The public Kaggle production notebook is **prebuilt-runtime only**: Accelerator=None selects CPU; T4/T4x2 selects CUDA0 slot 0; P100, TPU and other unsupported accelerators fail closed. There is no CPU fallback from an attached unsupported GPU and no source-build fallback.
 
-## Platform support & qualification status
+## Canonical fresh CPU ↔ T4 benchmark
 
-| Environment | Backend | v1.0.0 status |
-|---|---|---:|
-| Linux x86-64 | CPU | Qualification pending |
-| Linux + NVIDIA GPU | CUDA (`cuda0`) | Qualification pending |
-| Kaggle CPU notebook | CPU adapter | Qualification pending |
-| Kaggle T4/T4x2 notebook | CUDA adapter (`cuda0`) | Qualification pending |
-| CUDA multi-GPU | `cuda0&cuda1` | Experimental / not a release gate |
-| Vulkan / Metal / ROCm / SYCL / Windows | GPU | Planned / not a release target for v1.0.0 |
+Both authoritative evidence sessions used the same notebook source, source HEAD, model inputs, prompt, seed, steps, CFG, threads and matrix order.
 
-## Why no PyTorch?
+| Resolution | CPU native | T4 native | Native speedup | CPU wall | T4 wall | Wall speedup | T4 GPU peak |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 512×512 | 215.816 s | 7.590 s | **28.43×** | 238.072 s | 27.209 s | **8.75×** | 7,930 MiB |
+| 640×640 | 338.014 s | 8.698 s | **38.86×** | 363.299 s | 29.040 s | **12.51×** | 8,356 MiB |
+| 768×768 | 491.700 s | 9.710 s | **50.64×** | 513.961 s | 30.072 s | **17.09×** | 8,702 MiB |
+| 1024×1024 | 939.371 s | 12.420 s | **75.63×** | 962.737 s | 33.047 s | **29.13×** | 9,316 MiB |
 
-The diffusion step, text conditioning and VAE decoding are all executed by the native `sd-cli` runtime. Python only validates configuration and models, builds the explicit subprocess argv (`shell=False`), monitors the process, and collects evidence.
+**Headline:** at 1024×1024, T4 native generation completed in **12.420 s** versus **939.371 s** on CPU — a **75.63×** same-resolution native-generation speedup.
 
-## Model loading and SHA verification
+See [the complete benchmark evidence](docs/BENCHMARKS-v1.0.0.md) for notebook/runtime hashes, methodology and interpretation rules.
 
-Model files are **user-supplied or mounted**; the repository does not commit model weights. Loading uses a JSON model manifest:
+## Why native inference?
+
+The diffusion step, text conditioning and VAE decoding are executed by `sd-cli`; there is no PyTorch/Transformers inference loop in the project. Python validates model identity, builds explicit subprocess arguments with `shell=False`, monitors the native process and records evidence.
+
+## Verify the model stack
 
 ```bash
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
 ```
 
-Every canonical component is SHA-256 verified before a real inference service starts. A missing or ambiguous component **fails closed**. Explicit paths override discovery.
+## Local Linux CPU
 
-## Local Linux quick start
-
-Prerequisites: Linux, Python 3.10+, CMake, a C/C++ toolchain.
+The generic CLI still supports building a local runtime when deliberately developing outside the production Kaggle notebook:
 
 ```bash
 python -m pip install -e .
-mageflow-native runtime build --backend cpu      # build the pinned CPU sd-cli
+mageflow-native runtime build --backend cpu
 mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json
 mageflow-native verify --manifest configs/mage-flow-turbo-q8-reference.json
-mageflow-native generate \
-    --manifest configs/mage-flow-turbo-q8-reference.json \
-    --prompt "A small red fox sitting in a quiet green forest" --output output
 ```
 
-Provide the three model files at the manifest paths (or set `MAGE_MODEL_ROOT`), or point `--manifest`/`--model-root` at your own layout.
-
-## NVIDIA CUDA quick start
-
-Prerequisites: an NVIDIA GPU, CUDA toolkit, CMake, a C/C++ toolchain.
+## NVIDIA CUDA
 
 ```bash
 python -m pip install -e .
-mageflow-native runtime build --backend cuda      # deterministic CUDA build of the pinned source
+mageflow-native runtime build --backend cuda
 mageflow-native doctor --manifest configs/mage-flow-turbo-q8-reference.json --backend cuda0
-mageflow-native generate --manifest configs/mage-flow-turbo-q8-reference.json \
-    --backend cuda0 --prompt "A small red fox" --output output
 ```
 
-Qualification uses explicit deterministic placement (`cpu` or `cuda0`), never `auto` or `--auto-fit`.
-
-## Backend placement / low-VRAM examples
-
-The pinned runtime supports separate runtime and parameter placement as well as per-module assignments. For example on a low-VRAM T4:
-
-```bash
-mageflow-native generate --manifest MODEL.json --output output \
-    --backend "diffusion=cuda0,te=cpu,vae=cpu" \
-    --params-backend "diffusion=cuda0,te=cpu,vae=cpu" \
-    --max-vram 4G
-```
-
-Multi-GPU, Vulkan, Metal, ROCm and SYCL are documented upstream features but are **not v1.0.0 qualification targets**.
-
-## Kaggle integration
-
-Kaggle is an **adapter/reference environment**, not a required runtime platform. Final live CPU/CUDA qualification for v1.0.0 is pending. Kaggle-specific behavior lives under `integrations/kaggle/` and only discovers mounted inputs and generates a generic manifest; the same generic core then runs on CPU or CUDA. See [docs/kaggle.md](docs/kaggle.md) and [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb).
-
-## CLI
-
-```text
-mageflow-native doctor                       show OS/arch, runtime, devices, backend, manifest
-mageflow-native verify                       verify runtime and model identities (no inference)
-mageflow-native generate [GENERATION]        one local generation
-mageflow-native serve                        start loopback REST service
-mageflow-native runtime build --backend cpu|cuda
-```
+Release qualification uses deterministic placement (`cpu` or `cuda0`), never inference auto-splitting.
 
 ## REST API
 
-The loopback service binds to `127.0.0.1` by default.
+The reference service binds to `127.0.0.1` by default.
 
 ```text
 GET  /healthz
@@ -137,30 +98,60 @@ POST /v1/images/generate
 GET  /v1/artifacts/<png>
 ```
 
-See [docs/REST-API.md](docs/REST-API.md). Public exposure, if used, is a separate authenticated gateway and is not part of qualification.
+## Kaggle integration
 
-## Reproducibility / evidence
+The public notebook [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) automatically detects the supported Kaggle accelerator. Public defaults are `RUN_MODE="experiment"` and `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainers can opt into one-shot `evidence` mode for the frozen `512 → 640 → 768 → 1024` matrix. See [docs/kaggle.md](docs/kaggle.md).
 
-The qualification harnesses record backend spec, runtime identity, model hashes, prompt/seed/steps/CFG/threads/resolution, exit code, wall time, peak RAM and (CUDA) GPU telemetry, PNG dimensions/mode/size/SHA, and the exact source Git head. Evidence is packaged sanitized. See [docs/TESTING.md](docs/TESTING.md) and [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+### Kaggle model-attachment policy
 
-## Canonical qualification request
+For normal Kaggle inference, attach only the Mage-Flow-Turbo diffusion family required by the selected profile.
 
-The canonical qualification request produces one 512×512 PNG with seed 42, 4 steps, CFG 1.0, 4 threads and the canonical fox prompt. Final CPU and CUDA reference SHA-256 values are recorded only after the exact published source head passes the corresponding external qualification gate. CUDA output may legitimately differ in bytes from CPU output.
+- `q8-reference` — attach the Mage-Flow GGUF `q8-0` diffusion assets. The shared Qwen GGUF text encoder and VAE-only SafeTensors remain normal parts of this profile.
+- `bf16-high-memory-cpu` — attach the Mage-Flow PyTorch/Transformers SafeTensors `default` assets for the BF16 transformer/VAE, plus the shared Qwen text encoder.
 
-## Limitations
+Do not attach both the Mage-Flow `GGUF / q8-0` diffusion family and the Mage-Flow `PyTorch / default` diffusion family in an ordinary Kaggle session.
 
-- No automatic model downloading in the core; users supply files.
-- Windows, macOS, AMD ROCm, Metal, Vulkan and Intel SYCL are **not** v1.0.0 qualification targets.
-- No training, fine-tuning or model conversion.
-- Only the frozen Q8_0 + Q4_K_M reference stack is in v1.0.0 qualification scope.
+Attaching files does not necessarily load every model fully into RAM immediately, but mixed families increase input footprint, discovery/hash overhead, and the risk of accidentally loading or memory-mapping both variants. On memory-constrained Kaggle sessions this can cause severe memory pressure or misleading performance measurements.
 
-## Documentation and contributing
+The exception is controlled benchmarking/comparison. The repository's visual benchmark explicitly allows both frozen diffusion families, verifies their exact identities, and executes them sequentially for reproducible A/B evaluation.
+
+For normal use: **one selected profile per Kaggle session**.
+
+The BF16 profile remains a supported, opt-in, high-memory / quality-oriented experimental profile; Q8 remains the default/canonical profile.
+
+### BF16 CPU evidence
+
+A completed same-host paired 768×768 visual benchmark on 4 CPU threads gives:
+
+| Tested CPU profile | Mean / image | Peak `sd-cli` RSS | Current role |
+|---|---:|---:|---|
+| `q8-reference` | ~10.67 min | ~8.89 GB | canonical/default |
+| `bf16-high-memory-cpu` | ~16.90 min | ~12.54 GB | supported opt-in experimental |
+
+In the completed 10-pair blind 768×768 comparison, BF16 won 4 prompts, Q8 won 3 and 3 tied; only one BF16 win was materially clear. Therefore BF16 remains available for quality-oriented experimentation, but current evidence does not justify replacing Q8 as the default. See [docs/BF16-HIGH-MEMORY-CPU.md](docs/BF16-HIGH-MEMORY-CPU.md).
+
+## Reproducibility and evidence
+
+The canonical request is:
+
+```text
+prompt  = A small red fox sitting in a quiet green forest, natural light, detailed photography.
+seed    = 42
+steps   = 4
+CFG     = 1.0
+threads = 4
+```
+
+CPU and CUDA outputs may legitimately differ byte-for-byte across numerical backends. Evidence records exact source/runtime/model identity, backend, prompt, dimensions, timing class, memory telemetry and PNG SHA-256.
+
+## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Model stack](docs/model-stack.md)
 - [Local Linux](docs/local-linux.md)
 - [CUDA](docs/cuda.md)
 - [Kaggle](docs/kaggle.md)
+- [Canonical benchmarks](docs/BENCHMARKS-v1.0.0.md)
 - [REST API](docs/REST-API.md)
 - [Testing](docs/TESTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
