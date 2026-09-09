@@ -525,6 +525,49 @@ def test_preflight_bf16_input_discovery_fails(tmp_path, monkeypatch):
         bench._prepare_all_profile_assets()
 
 
+def test_prepare_profile_assets_requests_mixed_family_override(tmp_path, monkeypatch):
+    bench = _preflight_bench(tmp_path)
+    monkeypatch.setattr(
+        "integrations.kaggle.profiles.validate_profile_environment",
+        lambda *a, **kw: object(),
+    )
+    calls = []
+
+    def fake_build(*, input_root, output, profile, allow_mixed_diffusion_families=False):
+        calls.append(
+            {
+                "input_root": input_root,
+                "output": output,
+                "profile": profile,
+                "allow_mixed_diffusion_families": allow_mixed_diffusion_families,
+            }
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({"components": {}}), encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(
+        "integrations.kaggle.input_adapter.build_kaggle_manifest",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "integrations.kaggle.visual_benchmark.load_manifest",
+        lambda *a, **kw: _fake_model_manifest_for(vb.Q8_PROFILE, tmp_path),
+    )
+    monkeypatch.setattr(
+        "integrations.kaggle.visual_benchmark.verify_manifest",
+        lambda m: {
+            "diffusion": tmp_path / "diffusion.bin",
+            "text_encoder": tmp_path / "te.bin",
+            "vae": tmp_path / "vae.bin",
+        },
+    )
+    bench._prepare_profile_assets(vb.Q8_PROFILE)
+    assert len(calls) == 1
+    assert calls[0]["profile"] == vb.Q8_PROFILE
+    assert calls[0]["allow_mixed_diffusion_families"] is True
+
+
 def test_preflight_q8_model_verification_fails(tmp_path, monkeypatch):
     bench = _preflight_bench(tmp_path)
     _mock_env_gate(monkeypatch)

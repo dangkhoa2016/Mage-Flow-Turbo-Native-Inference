@@ -4,6 +4,11 @@ from pathlib import Path
 import pytest
 
 from integrations.kaggle import input_adapter
+from integrations.kaggle.input_adapter import (
+    InputAttachmentPolicyError,
+    detect_attached_diffusion_families,
+    validate_kaggle_input_attachment_policy,
+)
 from integrations.kaggle.profiles import (
     BF16_HIGH_MEMORY_CPU_PROFILE,
     BF16_MIN_HEADROOM_KB,
@@ -132,3 +137,99 @@ def test_build_kaggle_manifest_emits_bf16_diffusion_component(tmp_path: Path, mo
     assert diffusion["format"] == "safetensors"
     assert diffusion["sha256"] == BF16_TRANSFORMER_SHA256
     assert "quantization" not in diffusion
+
+
+def _write_input_file(path: Path, data: bytes = b"placeholder") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _mixed_diffusion_tree(tmp_path):
+    input_root = tmp_path / "input"
+    _write_input_file(
+        input_root
+        / "mage-flow-community-mage-flow-turbo"
+        / "gguf"
+        / "q8-0"
+        / "Mage-Flow-Turbo-DiT-Q8_0.gguf"
+    )
+    _write_input_file(
+        input_root
+        / "mage-flow-community-mage-flow-turbo"
+        / "pytorch"
+        / "default"
+        / "transformer"
+        / "diffusion_pytorch_model.safetensors"
+    )
+    return input_root
+
+
+def test_policy_normal_mode_rejects_both_mage_diffusion_families(tmp_path):
+    input_root = _mixed_diffusion_tree(tmp_path)
+    families = detect_attached_diffusion_families(input_root)
+    assert families == (Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE)
+    with pytest.raises(InputAttachmentPolicyError) as exc_info:
+        validate_kaggle_input_attachment_policy(input_root)
+    msg = str(exc_info.value).lower()
+    for fact in (
+        "normal Kaggle inference",
+        "both Mage-Flow-Turbo diffusion families detected",
+        "q8-reference",
+        "GGUF",
+        "bf16-high-memory-cpu",
+        "PyTorch/Transformers SafeTensors",
+        "detach one family",
+        "restart the Kaggle session",
+        "controlled benchmark",
+    ):
+        assert fact.lower() in msg, f"policy error must state: {fact!r}"
+
+
+def test_policy_q8_plus_vae_only_safetensors_is_valid(tmp_path):
+    input_root = tmp_path / "input"
+    _write_input_file(
+        input_root
+        / "mage-flow-community-mage-flow-turbo"
+        / "gguf"
+        / "q8-0"
+        / "Mage-Flow-Turbo-DiT-Q8_0.gguf"
+    )
+    _write_input_file(
+        input_root
+        / "mage-flow-community-mage-flow-turbo"
+        / "pytorch"
+        / "vae-only"
+        / "diffusion_pytorch_model.safetensors"
+    )
+    families = validate_kaggle_input_attachment_policy(input_root)
+    assert families == (Q8_REFERENCE_PROFILE,)
+
+
+def test_policy_bf16_only_input_is_valid(tmp_path):
+    input_root = tmp_path / "input"
+    _write_input_file(
+        input_root
+        / "mage-flow-community-mage-flow-turbo"
+        / "pytorch"
+        / "default"
+        / "transformer"
+        / "diffusion_pytorch_model.safetensors"
+    )
+    families = validate_kaggle_input_attachment_policy(input_root)
+    assert families == (BF16_HIGH_MEMORY_CPU_PROFILE,)
+
+
+def test_policy_benchmark_override_permits_both_families(tmp_path):
+    input_root = _mixed_diffusion_tree(tmp_path)
+    detected = detect_attached_diffusion_families(input_root)
+    assert detected == (Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE)
+    families = validate_kaggle_input_attachment_policy(
+        input_root,
+        allow_mixed_diffusion_families=True,
+    )
+    assert families == (Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE)
+
+
+def test_policy_empty_input_root_returns_no_families(tmp_path):
+    assert validate_kaggle_input_attachment_policy(tmp_path / "input") == ()

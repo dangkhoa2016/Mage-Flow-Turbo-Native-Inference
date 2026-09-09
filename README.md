@@ -102,6 +102,23 @@ GET  /v1/artifacts/<png>
 
 The public notebook [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) automatically detects the supported Kaggle accelerator. Public defaults are `RUN_MODE="experiment"` and `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainers can opt into one-shot `evidence` mode for the frozen `512 → 640 → 768 → 1024` matrix. See [docs/kaggle.md](docs/kaggle.md).
 
+### Kaggle model-attachment policy
+
+For normal Kaggle inference, attach only the Mage-Flow-Turbo diffusion family required by the selected profile.
+
+- `q8-reference` — attach the Mage-Flow GGUF `q8-0` diffusion assets. The shared Qwen GGUF text encoder and VAE-only SafeTensors remain normal parts of this profile.
+- `bf16-high-memory-cpu` — attach the Mage-Flow PyTorch/Transformers SafeTensors `default` assets for the BF16 transformer/VAE, plus the shared Qwen text encoder.
+
+Do not attach both the Mage-Flow `GGUF / q8-0` diffusion family and the Mage-Flow `PyTorch / default` diffusion family in an ordinary Kaggle session.
+
+Attaching files does not necessarily load every model fully into RAM immediately, but mixed families increase input footprint, discovery/hash overhead, and the risk of accidentally loading or memory-mapping both variants. On memory-constrained Kaggle sessions this can cause severe memory pressure or misleading performance measurements.
+
+The exception is controlled benchmarking/comparison. The repository's visual benchmark explicitly allows both frozen diffusion families, verifies their exact identities, and executes them sequentially for reproducible A/B evaluation.
+
+For normal use: **one selected profile per Kaggle session**.
+
+The BF16 profile remains a supported, opt-in, high-memory / quality-oriented experimental profile; Q8 remains the default/canonical profile.
+
 ## Reproducibility and evidence
 
 The canonical request is:

@@ -98,6 +98,21 @@ GET  /v1/artifacts/<png>
 
 Notebook public [notebooks/kaggle-production-demo.ipynb](notebooks/kaggle-production-demo.ipynb) tự detect accelerator Kaggle được hỗ trợ. Mặc định public là `RUN_MODE="experiment"` và `RUN_FAIR_COMPARISON_BENCHMARK=False`; maintainer có thể bật one-shot `evidence` mode để chạy matrix đóng băng `512 → 640 → 768 → 1024`. Xem [docs/kaggle.vi.md](docs/kaggle.vi.md).
 
+### Policy attach model trên Kaggle
+
+Với inference thông thường, chỉ attach đúng Mage-Flow-Turbo diffusion family mà profile đã chọn cần dùng.
+
+- `q8-reference` — attach Mage-Flow `GGUF / q8-0`; Qwen GGUF dùng chung và VAE-only SafeTensors vẫn là thành phần hợp lệ.
+- `bf16-high-memory-cpu` — attach Mage-Flow `PyTorch / default` chứa BF16 transformer/VAE, cùng Qwen text encoder dùng chung.
+
+Không attach đồng thời cả Mage-Flow `GGUF / q8-0` và `PyTorch / default` trong một Kaggle session inference thông thường.
+
+Ngoại lệ duy nhất là benchmark/comparison có kiểm soát; khi đó hai profile phải được verify và chạy tuần tự, không chạy đồng thời.
+
+Với người dùng bình thường: **một profile được chọn cho mỗi Kaggle session**.
+
+BF16 là profile experimental, opt-in, hướng RAM cao / chất lượng; Q8 vẫn là profile mặc định/canonical.
+
 ## Tái lập và evidence
 
 Canonical request:
