@@ -52,7 +52,15 @@ def _record(resolution, *, elapsed_ms, backend, status="passed"):
         },
         "elapsed_ms": elapsed_ms if status == "passed" else None,
         "gpu_peak_mib": 8192 if backend == "cuda0" and status == "passed" else None,
-        "artifact": {"sha256": "a" * 64} if status == "passed" else {},
+        "artifact": (
+            {
+                "sha256": "a" * 64,
+                "width": resolution,
+                "height": resolution,
+            }
+            if status == "passed"
+            else {}
+        ),
     }
     if status != "passed":
         record["error"] = {"type": "RuntimeError", "message": "oom"}
@@ -60,14 +68,38 @@ def _record(resolution, *, elapsed_ms, backend, status="passed"):
 
 
 def _aggregate(profile, backend, *, elapsed, source_head=HEAD, source_tree=TREE):
-    records = []
-    for resolution, elapsed_ms in zip([512, 640, 768, 1024], elapsed):
-        rec = _record(resolution, elapsed_ms=elapsed_ms, backend=backend)
-        rec["profile"] = profile
-        rec["source_head"] = source_head
-        rec["source_tree"] = source_tree
-        records.append(rec)
     is_cuda = backend == "cuda0"
+    session = {
+        "hostname": "fake",
+        "backend": backend,
+        "cuda_device_order": "PCI_BUS_ID" if is_cuda else None,
+        "cuda_visible_devices": "0" if is_cuda else None,
+        "physical_gpus": ([{"index": 0, "name": "Tesla T4"}] if is_cuda else []),
+    }
+    runtime = {
+        "commit": cmp.PINNED_SDCPP_COMMIT,
+        "sha256": (
+            cmp.CPU_RUNTIME_SHA256 if backend == "cpu" else cmp.CUDA_RUNTIME_SHA256
+        ),
+        "devices": "cuda0 NVIDIA Tesla T4" if is_cuda else "CPU Intel Xeon",
+    }
+    models = _model(profile)
+    records = []
+    for resolution, elapsed_ms in zip(cmp.EXPECTED_RESOLUTIONS, elapsed):
+        rec = _record(resolution, elapsed_ms=elapsed_ms, backend=backend)
+        rec.update(
+            {
+                "schema_version": 2,
+                "release_version": "1.0.0",
+                "profile": profile,
+                "source_head": source_head,
+                "source_tree": source_tree,
+                "session": session,
+                "runtime": runtime,
+                "models": models,
+            }
+        )
+        records.append(rec)
     return {
         "schema_version": 2,
         "release_version": "1.0.0",
@@ -76,25 +108,13 @@ def _aggregate(profile, backend, *, elapsed, source_head=HEAD, source_tree=TREE)
         "source_tree": source_tree,
         "profile": profile,
         "backend": backend,
-        "session": {
-            "hostname": "fake",
-            "backend": backend,
-            "cuda_device_order": "PCI_BUS_ID" if is_cuda else None,
-            "cuda_visible_devices": "0" if is_cuda else None,
-            "physical_gpus": ([{"index": 0, "name": "Tesla T4"}] if is_cuda else []),
-        },
-        "matrix_resolutions": [512, 640, 768, 1024],
-        "completed_resolutions": [512, 640, 768, 1024],
+        "session": session,
+        "matrix_resolutions": list(cmp.EXPECTED_RESOLUTIONS),
+        "completed_resolutions": list(cmp.EXPECTED_RESOLUTIONS),
         "failed_resolution": None,
         "error": None,
-        "runtime": {
-            "commit": cmp.PINNED_SDCPP_COMMIT,
-            "sha256": (
-                cmp.CPU_RUNTIME_SHA256 if backend == "cpu" else cmp.CUDA_RUNTIME_SHA256
-            ),
-            "devices": "cuda0 NVIDIA Tesla T4" if is_cuda else "CPU Intel Xeon",
-        },
-        "models": _model(profile),
+        "runtime": runtime,
+        "models": models,
         "matrix": records,
     }
 
@@ -160,6 +180,14 @@ def test_source_tree_mismatch_fails(tmp_path):
     result = _build(tmp_path, cells)
     assert result["comparability"] == "failed"
     assert any("source_tree" in error for error in result["errors"])
+
+
+def test_per_record_head_tampering_fails(tmp_path):
+    cells = _valid_cells()
+    cells["q8_cpu"]["matrix"][1]["source_head"] = "0" * 40
+    result = _build(tmp_path, cells)
+    assert result["comparability"] == "failed"
+    assert any("record source_head mismatch" in error for error in result["errors"])
 
 
 def test_wrong_model_identity_fails(tmp_path):
@@ -242,11 +270,39 @@ def test_resolution_order_mismatch_fails(tmp_path):
     assert any("resolution" in error for error in result["errors"])
 
 
+def test_duplicate_resolution_record_fails(tmp_path):
+    cells = _valid_cells()
+    cells["q8_cpu"]["matrix"][2]["resolution"] = {"width": 640, "height": 640}
+    result = _build(tmp_path, cells)
+    assert result["comparability"] == "failed"
+    assert any("duplicate resolution" in error for error in result["errors"])
+
+
+def test_passed_matrix_missing_1024_fails(tmp_path):
+    cells = _valid_cells()
+    cells["bf16_cpu"]["matrix"] = cells["bf16_cpu"]["matrix"][:-1]
+    cells["bf16_cpu"]["completed_resolutions"] = [512, 640, 768]
+    result = _build(tmp_path, cells)
+    assert result["comparability"] == "failed"
+    assert any("all four resolutions" in error for error in result["errors"])
+
+
 def test_partial_later_resolution_keeps_identity_comparable_but_omits_ratios(tmp_path):
     cells = _valid_cells()
     cell = cells["bf16_cuda0"]
     failed = _record(768, elapsed_ms=0, backend="cuda0", status="failed")
-    failed["profile"] = cmp.BF16_PROFILE
+    failed.update(
+        {
+            "schema_version": 2,
+            "release_version": "1.0.0",
+            "profile": cmp.BF16_PROFILE,
+            "source_head": cell["source_head"],
+            "source_tree": cell["source_tree"],
+            "session": cell["session"],
+            "runtime": cell["runtime"],
+            "models": cell["models"],
+        }
+    )
     cell["matrix"] = [cell["matrix"][0], cell["matrix"][1], failed]
     cell["status"] = "failed"
     cell["completed_resolutions"] = [512, 640]
