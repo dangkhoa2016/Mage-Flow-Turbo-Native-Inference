@@ -150,7 +150,7 @@ Không attach đồng thời hai Mage diffusion families trong authority session
 
 Trước redesign strict 2×2, dự án đã thực hiện một paired visual study 768×768 trên CPU cùng host để so Q8 và BF16. Nghiên cứu lịch sử đó vẫn hữu ích cho hướng chất lượng, nhưng không phải final v1.0.0 2×2 performance authority và không quyết định default profile. Q8 vẫn là canonical/default.
 
-Xem [BF16 SafeTensors background và qualification policy](docs/BF16-HIGH-MEMORY-CPU.vi.md).
+Xem [BF16 SafeTensors background và qualification policy](docs/BF16-SAFETENSORS.vi.md).
 
 ## Tái lập và evidence
 
@@ -177,7 +177,7 @@ Evidence archives có checksum, internal manifest, và fail nếu chứa model w
 - [CUDA](docs/cuda.md)
 - [Kaggle](docs/kaggle.vi.md)
 - [Strict v1.0.0 benchmark contract](docs/BENCHMARKS-v1.0.0.vi.md)
-- [BF16 SafeTensors profile](docs/BF16-HIGH-MEMORY-CPU.vi.md)
+- [BF16 SafeTensors profile](docs/BF16-SAFETENSORS.vi.md)
 - [REST API](docs/REST-API.md)
 - [Kiểm thử](docs/TESTING.vi.md)
 - [Xử lý sự cố](docs/TROUBLESHOOTING.vi.md)
