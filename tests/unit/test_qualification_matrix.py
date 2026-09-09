@@ -1,12 +1,13 @@
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from integrations.kaggle import qualification_matrix as qm
 from integrations.kaggle.profiles import (
-    BF16_HIGH_MEMORY_CPU_PROFILE,
+    BF16_SAFETENSORS_PROFILE,
     ProfilePreflightError,
     Q8_REFERENCE_PROFILE,
     get_profile,
@@ -22,86 +23,83 @@ from mageflow_native.inference.runner import ArtifactInfo, GenerationResult
 from mageflow_native.models.manifest import ModelComponent, ModelManifest
 
 DIT_SHA = "4c3dafc143ee64121692b6b63563a4f5288bf6183c4870e1d65f1566519ba7f0"
+BF16_SHA = "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d"
 QWEN_SHA = "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a"
 VAE_SHA = "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
 
 
-def _write_executable(tmp_path: Path, name: str = "sd-cli") -> Path:
+def _write_executable(tmp_path: Path, name: str) -> Path:
     path = tmp_path / name
     path.write_bytes(b"#!/bin/sh\necho sd-cli 6b3edaa fake\n")
     path.chmod(0o755)
     return path
 
 
-def _install_runtime(monkeypatch, tmp_path: Path) -> Path:
-    cli = _write_executable(tmp_path)
-    monkeypatch.setenv("MAGE_CPU_PREBUILT_SD_CLI", str(cli))
-    monkeypatch.setattr(
-        qm,
-        "BF16_CPU_RUNTIME_SHA256",
-        hashlib.sha256(cli.read_bytes()).hexdigest(),
+def _install_runtime(monkeypatch, tmp_path: Path, backend: str) -> Path:
+    cli = _write_executable(tmp_path, f"sd-cli-{backend}")
+    spec = qm.runtime_spec_for_backend(backend)
+    monkeypatch.setenv(spec.env_var, str(cli))
+    monkeypatch.setitem(
+        qm._RUNTIME_SPECS,
+        backend,
+        qm.RuntimeSpec(
+            env_var=spec.env_var,
+            sha256=hashlib.sha256(cli.read_bytes()).hexdigest(),
+        ),
     )
     return cli
 
 
-def _fake_manifest(tmp_path: Path) -> ModelManifest:
+def _fake_manifest(tmp_path: Path, profile: str) -> ModelManifest:
+    diffusion_sha = DIT_SHA if profile == Q8_REFERENCE_PROFILE else BF16_SHA
+    diffusion_format = "gguf" if profile == Q8_REFERENCE_PROFILE else "safetensors"
+    diffusion_quant = "Q8_0" if profile == Q8_REFERENCE_PROFILE else None
     return ModelManifest(
         schema_version=1,
         model_family="Mage-Flow-Turbo",
-        diffusion=ModelComponent(tmp_path / "dit.safetensors", DIT_SHA, "safetensors"),
-        text_encoder=ModelComponent(tmp_path / "qwen.gguf", QWEN_SHA, "gguf", "Q4_K_M"),
-        vae=ModelComponent(tmp_path / "vae.safetensors", VAE_SHA, "safetensors"),
+        diffusion=ModelComponent(
+            tmp_path / "dit.model",
+            diffusion_sha,
+            diffusion_format,
+            diffusion_quant,
+        ),
+        text_encoder=ModelComponent(
+            tmp_path / "qwen.gguf",
+            QWEN_SHA,
+            "gguf",
+            "Q4_K_M",
+        ),
+        vae=ModelComponent(
+            tmp_path / "vae.safetensors",
+            VAE_SHA,
+            "safetensors",
+        ),
     )
 
 
-def _fake_result(width: int, height: int, **overrides) -> GenerationResult:
-    values = dict(
-        request_id=f"fake-{width}",
+def _fake_result(width: int, *, backend: str, gpu_peak_mib=None, min_mem=None):
+    if gpu_peak_mib is None and backend == "cuda0":
+        gpu_peak_mib = 8192
+    if min_mem is None and backend == "cpu":
+        min_mem = 4 * 1024 * 1024
+    return GenerationResult(
+        request_id=f"fake-{backend}-{width}",
         seed=CANONICAL_SEED,
         exit_code=0,
         elapsed_ms=1234,
         peak_sd_cli_rss_kb=1000,
-        minimum_mem_available_kb=4 * 1024 * 1024,
-        gpu_peak_mib=None,
+        minimum_mem_available_kb=min_mem,
+        gpu_peak_mib=gpu_peak_mib,
         artifact=ArtifactInfo(
             filename=f"fake-{width}.png",
             bytes=1024,
             sha256="d" * 64,
             width=width,
-            height=height,
+            height=width,
         ),
         stdout_path="/tmp/out.log",
         stderr_path="/tmp/err.log",
     )
-    values.update(overrides)
-    return GenerationResult(**values)
-
-
-def _patch_manifest_build(monkeypatch, manifest, calls):
-    def fake_build(input_root, output, *, profile):
-        calls.append((input_root, output, profile))
-        output = Path(output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-        return output
-
-    monkeypatch.setattr(qm, "build_kaggle_manifest", fake_build)
-
-
-def _patch_manifest_verify(monkeypatch, manifest, calls):
-    def fake_load(path, *, model_root=None):
-        return manifest
-
-    def fake_verify(m):
-        calls.append(m)
-        return {
-            "diffusion": manifest.diffusion.path,
-            "text_encoder": manifest.text_encoder.path,
-            "vae": manifest.vae.path,
-        }
-
-    monkeypatch.setattr(qm, "load_manifest", fake_load)
-    monkeypatch.setattr(qm, "verify_manifest", fake_verify)
 
 
 class _FakeRuntimeManager:
@@ -112,446 +110,317 @@ class _FakeRuntimeManager:
         self.explicit_sd_cli = explicit_sd_cli
 
     def verify(self, sd_cli_path, requested_backend):
-        self.verifies.append((sd_cli_path, requested_backend))
+        self.verifies.append((str(sd_cli_path), requested_backend))
         from mageflow_native.runtime.manager import RuntimeIdentity
 
+        devices = (
+            "cuda0 NVIDIA Tesla T4" if requested_backend == "cuda0"
+            else "CPU Intel Xeon"
+        )
         return RuntimeIdentity(
             path=str(sd_cli_path),
             version_output="sd-cli 6b3edaa (fake)",
-            devices_output="CPU Intel(R) Xeon(R) CPU @ 2.00GHz",
+            devices_output=devices,
             pinned_commit="6b3edaaf32cc19e5bb2d819c788bd557eddc8eba",
         )
 
 
-def _patch_runtime_manager(monkeypatch) -> list:
-    calls: list = []
-    _FakeRuntimeManager.verifies = calls
-    monkeypatch.setattr(qm, "RuntimeManager", _FakeRuntimeManager)
-    return calls
-
-
-def _patch_run_generation(monkeypatch, calls, *, raise_at=None) -> None:
-    def fake(sd_cli, manifest, backend_spec, **kwargs):
-        calls.append(kwargs)
-        width = kwargs["width"]
-        if raise_at is not None and width == raise_at:
-            raise RuntimeError(f"boom at {width}")
-        return _fake_result(width=width, height=kwargs.get("height", width))
-
-    monkeypatch.setattr(qm, "run_generation", fake)
-
-
-def _patch_mem_total(monkeypatch) -> None:
-    monkeypatch.setattr(qm, "_mem_total_kb", lambda: 64 * 1024 * 1024)
-
-
-@pytest.fixture
-def matrix_env(monkeypatch, tmp_path):
-    work_root = tmp_path / "work"
+def _setup(monkeypatch, tmp_path: Path, profile: str, backend: str):
     input_root = tmp_path / "input"
-    manifest = _fake_manifest(tmp_path)
+    work_root = tmp_path / "work"
+    manifest = _fake_manifest(tmp_path, profile)
+    build_calls = []
+    verify_calls = []
+    generation_calls = []
 
-    build_calls: list = []
-    verify_calls: list = []
-    gen_calls: list = []
+    monkeypatch.setattr(qm, "_mem_total_kb", lambda: 64 * 1024 * 1024)
+    monkeypatch.setattr(qm, "read_mem_available_kb", lambda: 10 * 1024 * 1024)
+    _install_runtime(monkeypatch, tmp_path, backend)
 
-    _patch_mem_total(monkeypatch)
-    _install_runtime(monkeypatch, tmp_path)
-    _patch_manifest_build(monkeypatch, manifest, build_calls)
-    _patch_manifest_verify(monkeypatch, manifest, verify_calls)
-    runtime_verify_calls = _patch_runtime_manager(monkeypatch)
-    _patch_run_generation(monkeypatch, gen_calls)
+    def fake_build(input_root, output, *, profile):
+        build_calls.append((input_root, output, profile))
+        output = Path(output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text('{"schema_version": 1}\n', encoding="utf-8")
+        return output
+
+    def fake_load(path, *, model_root=None):
+        return manifest
+
+    def fake_verify(m):
+        verify_calls.append(m)
+        return {
+            "diffusion": manifest.diffusion.path,
+            "text_encoder": manifest.text_encoder.path,
+            "vae": manifest.vae.path,
+        }
+
+    _FakeRuntimeManager.verifies = []
+    monkeypatch.setattr(qm, "build_kaggle_manifest", fake_build)
+    monkeypatch.setattr(qm, "load_manifest", fake_load)
+    monkeypatch.setattr(qm, "verify_manifest", fake_verify)
+    monkeypatch.setattr(qm, "RuntimeManager", _FakeRuntimeManager)
+
+    def fake_generation(sd_cli, manifest, backend_spec, **kwargs):
+        generation_calls.append((backend_spec.backend, kwargs))
+        return _fake_result(kwargs["width"], backend=backend_spec.backend)
+
+    monkeypatch.setattr(qm, "run_generation", fake_generation)
+    if backend == "cuda0":
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    else:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     return {
-        "work_root": work_root,
         "input_root": input_root,
+        "work_root": work_root,
         "build_calls": build_calls,
         "verify_calls": verify_calls,
-        "runtime_verify_calls": runtime_verify_calls,
-        "gen_calls": gen_calls,
+        "generation_calls": generation_calls,
+        "runtime_verifies": _FakeRuntimeManager.verifies,
     }
 
 
-def _run(matrix_env, **overrides) -> tuple[int, dict]:
-    code, aggregate = qm.run_matrix(
-        input_root=matrix_env["input_root"],
-        work_root=matrix_env["work_root"],
-        backend="cpu",
-        profile=BF16_HIGH_MEMORY_CPU_PROFILE,
-        repo_dir=None,
-        **overrides,
+def _run(env, *, profile, backend, repo_dir=None, resolutions=None):
+    return qm.run_matrix(
+        input_root=env["input_root"],
+        work_root=env["work_root"],
+        backend=backend,
+        profile=profile,
+        repo_dir=repo_dir,
+        resolutions=resolutions,
     )
-    return code, aggregate
 
 
 def test_matrix_default_resolution_order_is_exact():
     assert qm.MATRIX_RESOLUTIONS == [512, 640, 768, 1024]
 
 
+def test_matrix_backends_are_cpu_and_cuda0_only():
+    assert qm.SUPPORTED_MATRIX_BACKENDS == ("cpu", "cuda0")
+
+
+def test_runtime_specs_are_frozen_per_backend():
+    assert qm.runtime_spec_for_backend("cpu").env_var == "MAGE_CPU_PREBUILT_SD_CLI"
+    assert qm.runtime_spec_for_backend("cpu").sha256 == (
+        "7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c"
+    )
+    assert qm.runtime_spec_for_backend("cuda0").env_var == "MAGE_CUDA_PREBUILT_SD_CLI"
+    assert qm.runtime_spec_for_backend("cuda0").sha256 == (
+        "3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0"
+    )
+
+
+def test_unknown_matrix_backend_fails_closed():
+    with pytest.raises(ValueError, match="unsupported matrix backend"):
+        qm.runtime_spec_for_backend("auto")
+
+
 def test_parse_resolutions_rejects_invalid_values():
-    with pytest.raises(ValueError):
-        qm.parse_resolutions("512,512")
-    with pytest.raises(ValueError):
-        qm.parse_resolutions("512,a,768")
-    with pytest.raises(ValueError):
-        qm.parse_resolutions("512,-4")
-    with pytest.raises(ValueError):
-        qm.parse_resolutions("0,512")
-    with pytest.raises(ValueError):
-        qm.parse_resolutions("1.5,512")
+    for value in ("512,512", "512,a", "0,512", "512,-4", "1.5,512"):
+        with pytest.raises(ValueError):
+            qm.parse_resolutions(value)
 
 
 def test_parse_resolutions_preserves_order():
     assert qm.parse_resolutions("768,512,1024") == [768, 512, 1024]
 
 
-def test_successful_matrix_runs_all_four_resolutions_in_order(matrix_env):
-    code, aggregate = _run(matrix_env)
+@pytest.mark.parametrize(
+    "profile,backend",
+    [
+        (Q8_REFERENCE_PROFILE, "cpu"),
+        (BF16_SAFETENSORS_PROFILE, "cpu"),
+        (Q8_REFERENCE_PROFILE, "cuda0"),
+        (BF16_SAFETENSORS_PROFILE, "cuda0"),
+    ],
+)
+def test_all_four_cells_run_ordered_matrix(monkeypatch, tmp_path, profile, backend):
+    env = _setup(monkeypatch, tmp_path, profile, backend)
+    code, aggregate = _run(env, profile=profile, backend=backend)
     assert code == 0
     assert aggregate["status"] == "passed"
+    assert aggregate["profile"] == profile
+    assert aggregate["backend"] == backend
     assert aggregate["completed_resolutions"] == [512, 640, 768, 1024]
-    dims = [(c["width"], c["height"]) for c in matrix_env["gen_calls"]]
-    assert dims == [(512, 512), (640, 640), (768, 768), (1024, 1024)]
-    assert [r["resolution"]["width"] for r in aggregate["matrix"]] == [512, 640, 768, 1024]
+    assert [call[1]["width"] for call in env["generation_calls"]] == [512, 640, 768, 1024]
+    assert len(env["build_calls"]) == 1
+    assert len(env["verify_calls"]) == 1
+    assert len(env["runtime_verifies"]) == 1
 
 
-def test_setup_happens_exactly_once_per_matrix_process(matrix_env):
-    code, _ = _run(matrix_env)
+def test_canonical_request_is_stable_for_all_runs(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, Q8_REFERENCE_PROFILE, "cpu")
+    code, _ = _run(env, profile=Q8_REFERENCE_PROFILE, backend="cpu")
     assert code == 0
-    assert len(matrix_env["build_calls"]) == 1
-    assert len(matrix_env["verify_calls"]) == 1
-    assert len(matrix_env["runtime_verify_calls"]) == 1
-
-
-def test_generation_params_stay_canonical_for_all_runs(matrix_env):
-    _run(matrix_env)
-    for kwargs in matrix_env["gen_calls"]:
+    for _, kwargs in env["generation_calls"]:
         assert kwargs["prompt"] == CANONICAL_PROMPT
         assert kwargs["seed"] == CANONICAL_SEED
         assert kwargs["steps"] == CANONICAL_STEPS
         assert kwargs["cfg_scale"] == CANONICAL_CFG
         assert kwargs["threads"] == CANONICAL_THREADS
-    assert all(c["width"] == c["height"] for c in matrix_env["gen_calls"])
+        assert kwargs["width"] == kwargs["height"]
+        assert kwargs["collect_cuda"] is False
 
 
-def test_headroom_validation_invoked_after_every_generation(matrix_env, monkeypatch):
-    from integrations.kaggle.profiles import validate_profile_result as real_validate
-
-    post_calls: list = []
-
-    def spy(name, *, minimum_mem_available_kb):
-        post_calls.append(minimum_mem_available_kb)
-        return real_validate(
-            name, minimum_mem_available_kb=minimum_mem_available_kb
-        )
-
-    monkeypatch.setattr(qm, "validate_profile_result", spy)
-    _run(matrix_env)
-    assert len(post_calls) == 4
+def test_cuda_enables_cuda_collection_and_positive_vram(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, Q8_REFERENCE_PROFILE, "cuda0")
+    code, aggregate = _run(env, profile=Q8_REFERENCE_PROFILE, backend="cuda0")
+    assert code == 0
+    assert all(call[0] == "cuda0" for call in env["generation_calls"])
+    assert all(call[1]["collect_cuda"] is True for call in env["generation_calls"])
+    assert all(record["gpu_peak_mib"] > 0 for record in aggregate["matrix"])
+    assert aggregate["session"]["cuda_visible_devices"] == "0"
 
 
-def test_failure_at_768_generation_prevents_1024(matrix_env, monkeypatch):
-    gen_calls = matrix_env["gen_calls"]
-    gen_calls.clear()
-
-    def fake(sd_cli, manifest, backend_spec, **kwargs):
-        gen_calls.append(kwargs)
-        if kwargs["width"] == 768:
-            raise RuntimeError("sd-cli exploded at 768")
-        return _fake_result(width=kwargs["width"], height=kwargs.get("height", kwargs["width"]))
-
-    monkeypatch.setattr(qm, "run_generation", fake)
-    code, aggregate = _run(matrix_env)
+def test_cuda_requires_exact_visible_device_mask(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, Q8_REFERENCE_PROFILE, "cuda0")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    code, aggregate = _run(env, profile=Q8_REFERENCE_PROFILE, backend="cuda0")
     assert code != 0
-    assert [c["width"] for c in gen_calls] == [512, 640, 768]
-    assert aggregate["status"] == "failed"
-    assert aggregate["failed_resolution"]["resolution"] == 768
-    assert aggregate["completed_resolutions"] == [512, 640]
-
-
-def test_headroom_failure_stops_matrix_and_writes_partial_evidence(matrix_env, monkeypatch):
-    gen_calls = matrix_env["gen_calls"]
-    gen_calls.clear()
-
-    def fake(sd_cli, manifest, backend_spec, **kwargs):
-        gen_calls.append(kwargs)
-        return _fake_result(width=kwargs["width"], height=kwargs.get("height", kwargs["width"]))
-
-    state = {"calls": 0}
-
-    def failing_validate(name, *, minimum_mem_available_kb):
-        state["calls"] += 1
-        if state["calls"] == 3:
-            raise ProfilePreflightError("headroom below 3 GiB at 768")
-        return None
-
-    monkeypatch.setattr(qm, "run_generation", fake)
-    monkeypatch.setattr(qm, "validate_profile_result", failing_validate)
-    code, aggregate = _run(matrix_env)
-    assert code != 0
-    assert [c["width"] for c in gen_calls] == [512, 640, 768]
-    assert aggregate["status"] == "failed"
-    assert aggregate["failed_resolution"]["resolution"] == 768
-    per_res = aggregate["matrix"][-1]
-    assert per_res["status"] == "failed"
-    aggregate_path = (
-        matrix_env["work_root"]
-        / "output"
-        / "qualification-matrix-bf16-high-memory-cpu-cpu.json"
-    )
-    assert aggregate_path.is_file()
-    saved = json.loads(aggregate_path.read_text(encoding="utf-8"))
-    assert saved["status"] == "failed"
-    assert saved["completed_resolutions"] == [512, 640]
-
-
-def test_cpu_bf16_rejects_cuda_backend_before_any_generation(matrix_env):
-    code, aggregate = (
-        qm.run_matrix(
-            input_root=matrix_env["input_root"],
-            work_root=matrix_env["work_root"],
-            backend="cuda0",
-            profile=BF16_HIGH_MEMORY_CPU_PROFILE,
-            repo_dir=None,
-        )
-    )
-    assert code != 0
-    assert aggregate["status"] == "failed"
-    assert matrix_env["gen_calls"] == []
-
-
-def test_missing_prebuilt_runtime_fails_before_any_generation(monkeypatch, tmp_path):
-    gen_calls: list = []
-    _patch_run_generation(monkeypatch, gen_calls)
-    _patch_mem_total(monkeypatch)
-    work_root = tmp_path / "work"
-    code, aggregate = qm.run_matrix(
-        input_root=tmp_path / "input",
-        work_root=work_root,
-        backend="cpu",
-        profile=BF16_HIGH_MEMORY_CPU_PROFILE,
-        repo_dir=None,
-    )
-    assert code != 0
-    assert aggregate["status"] == "failed"
     assert aggregate["error"]["phase"] == "setup"
-    assert gen_calls == []
+    assert "CUDA_VISIBLE_DEVICES=0" in aggregate["error"]["message"]
+    assert env["generation_calls"] == []
 
 
-def test_runtime_sha_mismatch_fails_before_any_generation(monkeypatch, tmp_path):
-    cli = _write_executable(tmp_path)
-    monkeypatch.setenv("MAGE_CPU_PREBUILT_SD_CLI", str(cli))
-    monkeypatch.setattr(qm, "BF16_CPU_RUNTIME_SHA256", "0" * 64)
-    _patch_mem_total(monkeypatch)
-    manifest = _fake_manifest(tmp_path)
-    _patch_manifest_build(monkeypatch, manifest, [])
-    _patch_manifest_verify(monkeypatch, manifest, [])
-    _patch_runtime_manager(monkeypatch)
-    gen_calls: list = []
-    _patch_run_generation(monkeypatch, gen_calls)
-    code, aggregate = qm.run_matrix(
-        input_root=tmp_path / "input",
-        work_root=tmp_path / "work",
-        backend="cpu",
-        profile=BF16_HIGH_MEMORY_CPU_PROFILE,
-        repo_dir=None,
-    )
+def test_cuda_missing_gpu_telemetry_fails_at_512(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, Q8_REFERENCE_PROFILE, "cuda0")
+
+    def fake_generation(sd_cli, manifest, backend_spec, **kwargs):
+        env["generation_calls"].append((backend_spec.backend, kwargs))
+        return _fake_result(kwargs["width"], backend="cuda0", gpu_peak_mib=0)
+
+    monkeypatch.setattr(qm, "run_generation", fake_generation)
+    code, aggregate = _run(env, profile=Q8_REFERENCE_PROFILE, backend="cuda0")
     assert code != 0
-    assert aggregate["status"] == "failed"
-    assert "mismatch" in aggregate["error"]["message"]
-    assert gen_calls == []
+    assert len(env["generation_calls"]) == 1
+    assert aggregate["failed_resolution"]["resolution"] == 512
+    assert aggregate["matrix"][0]["error"]["type"] == "MissingCudaTelemetryError"
 
 
-def test_missing_telemetry_stops_matrix(monkeypatch, tmp_path):
-    gen_calls: list = []
+def test_failure_stops_without_retry_or_backend_fallback(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, BF16_SAFETENSORS_PROFILE, "cuda0")
 
-    def fake(sd_cli, manifest, backend_spec, **kwargs):
-        gen_calls.append(kwargs)
-        return _fake_result(
-            width=kwargs["width"],
-            height=kwargs.get("height", kwargs["width"]),
-            minimum_mem_available_kb=None,
-        )
+    def fail(sd_cli, manifest, backend_spec, **kwargs):
+        env["generation_calls"].append((backend_spec.backend, kwargs))
+        raise RuntimeError("oom")
 
-    _install_runtime(monkeypatch, tmp_path)
-    _patch_mem_total(monkeypatch)
-    manifest = _fake_manifest(tmp_path)
-    _patch_manifest_build(monkeypatch, manifest, [])
-    _patch_manifest_verify(monkeypatch, manifest, [])
-    _patch_runtime_manager(monkeypatch)
-    monkeypatch.setattr(qm, "run_generation", fake)
-    code, aggregate = qm.run_matrix(
-        input_root=tmp_path / "input",
-        work_root=tmp_path / "work",
-        backend="cpu",
-        profile=BF16_HIGH_MEMORY_CPU_PROFILE,
-        repo_dir=None,
-    )
+    monkeypatch.setattr(qm, "run_generation", fail)
+    code, aggregate = _run(env, profile=BF16_SAFETENSORS_PROFILE, backend="cuda0")
     assert code != 0
-    assert [c["width"] for c in gen_calls] == [512]
+    assert len(env["generation_calls"]) == 1
+    assert env["generation_calls"][0][0] == "cuda0"
     assert aggregate["failed_resolution"]["resolution"] == 512
 
 
-def test_successful_matrix_writes_per_resolution_evidence(matrix_env):
-    code, _ = _run(matrix_env)
-    assert code == 0
-    output = matrix_env["work_root"] / "output"
-    for resolution in (512, 640, 768, 1024):
-        path = output / f"qualification-bf16-high-memory-cpu-cpu-{resolution:04d}.json"
-        assert path.is_file(), path
-        record = json.loads(path.read_text(encoding="utf-8"))
-        assert record["status"] == "passed"
-        assert record["resolution"]["width"] == resolution
-        assert record["resolution"]["height"] == resolution
-        assert record["request"]["cfg"] == CANONICAL_CFG
-        assert record["request"]["threads"] == CANONICAL_THREADS
+def test_failure_at_768_prevents_1024(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, BF16_SAFETENSORS_PROFILE, "cpu")
 
+    def fake_generation(sd_cli, manifest, backend_spec, **kwargs):
+        env["generation_calls"].append((backend_spec.backend, kwargs))
+        if kwargs["width"] == 768:
+            raise RuntimeError("boom")
+        return _fake_result(kwargs["width"], backend="cpu")
 
-def test_q8_reference_contract_remains_unchanged():
-    profile = get_profile(Q8_REFERENCE_PROFILE)
-    assert profile.name == "q8-reference"
-    assert profile.diffusion.filename == "Mage-Flow-Turbo-DiT-Q8_0.gguf"
-    assert profile.diffusion.format == "gguf"
-    assert profile.diffusion.quantization == "Q8_0"
-    assert profile.allowed_backends == ("cpu", "cuda0")
-
-
-def test_matrix_scope_is_cpu_only():
-    assert qm.CPU_BACKEND == "cpu"
-    assert qm.MATRIX_BACKENDS == ("cpu",)
-
-
-def test_each_resolution_gets_fresh_before_run_memory_sample(matrix_env, monkeypatch):
-    seq = iter(
-        [
-            9_000_000,
-            1000,
-            500_000,
-            2000,
-            600_000,
-            3000,
-            700_000,
-            4000,
-            800_000,
-        ]
-    )
-
-    def fake():
-        return next(seq)
-
-    monkeypatch.setattr(qm, "read_mem_available_kb", fake)
-    code, aggregate = _run(matrix_env)
-    assert code == 0
-    assert aggregate["setup"]["mem_available_before_kb"] == 9_000_000
-    before_runs = [
-        record["memory"]["mem_available_before_run_kb"]
-        for record in aggregate["matrix"]
-    ]
-    assert before_runs == [1000, 2000, 3000, 4000]
-    assert len(set(before_runs)) == 4
-
-
-def test_mem_available_after_run_recorded_per_resolution(matrix_env, monkeypatch):
-    seq = iter(
-        [
-            9_000_000,
-            1000,
-            500_000,
-            2000,
-            600_000,
-            3000,
-            700_000,
-            4000,
-            800_000,
-        ]
-    )
-    monkeypatch.setattr(qm, "read_mem_available_kb", lambda: next(seq))
-    code, aggregate = _run(matrix_env)
-    assert code == 0
-    after_runs = [
-        record["memory"]["mem_available_after_run_kb"]
-        for record in aggregate["matrix"]
-    ]
-    assert after_runs == [500_000, 600_000, 700_000, 800_000]
-
-
-def test_missing_per_run_pre_memory_telemetry_fails_closed(matrix_env, monkeypatch):
-    gen_calls = matrix_env["gen_calls"]
-    gen_calls.clear()
-    seq = iter([9_000_000, 1000, 500_000, None])
-
-    def fake():
-        return next(seq)
-
-    monkeypatch.setattr(qm, "read_mem_available_kb", fake)
-    code, aggregate = _run(matrix_env)
+    monkeypatch.setattr(qm, "run_generation", fake_generation)
+    code, aggregate = _run(env, profile=BF16_SAFETENSORS_PROFILE, backend="cpu")
     assert code != 0
-    assert aggregate["status"] == "failed"
-    assert [call["width"] for call in gen_calls] == [512]
+    assert [call[1]["width"] for call in env["generation_calls"]] == [512, 640, 768]
+    assert aggregate["completed_resolutions"] == [512, 640]
+
+
+def test_bf16_cpu_headroom_failure_stops_matrix(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, BF16_SAFETENSORS_PROFILE, "cpu")
+    state = {"calls": 0}
+
+    def validate(name, *, backend, minimum_mem_available_kb):
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise ProfilePreflightError("headroom below 3 GiB")
+
+    monkeypatch.setattr(qm, "validate_profile_result", validate)
+    code, aggregate = _run(env, profile=BF16_SAFETENSORS_PROFILE, backend="cpu")
+    assert code != 0
     assert aggregate["failed_resolution"]["resolution"] == 640
+    assert [call[1]["width"] for call in env["generation_calls"]] == [512, 640]
 
 
-def test_matrix_cpu_only_rejects_cuda0_for_q8_before_generation(matrix_env):
-    code, aggregate = qm.run_matrix(
-        input_root=matrix_env["input_root"],
-        work_root=matrix_env["work_root"],
-        backend="cuda0",
-        profile=Q8_REFERENCE_PROFILE,
-        repo_dir=None,
-    )
-    assert code != 0
-    assert aggregate["status"] == "failed"
-    assert aggregate["error"]["phase"] == "setup"
-    assert matrix_env["gen_calls"] == []
-
-
-def test_q8_cpu_matrix_succeeds_with_shared_prebuilt_runtime(matrix_env):
-    code, aggregate = qm.run_matrix(
-        input_root=matrix_env["input_root"],
-        work_root=matrix_env["work_root"],
-        backend="cpu",
-        profile=Q8_REFERENCE_PROFILE,
-        repo_dir=None,
-    )
-    assert code == 0
-    assert aggregate["status"] == "passed"
-    assert aggregate["completed_resolutions"] == [512, 640, 768, 1024]
-
-
-def test_q8_matrix_allowed_on_low_ram_host_without_bf16_gates(
-    matrix_env, monkeypatch
-):
+def test_bf16_cuda_does_not_use_cpu_headroom_gate(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, BF16_SAFETENSORS_PROFILE, "cuda0")
     monkeypatch.setattr(qm, "_mem_total_kb", lambda: 16 * 1024 * 1024)
-    code, aggregate = qm.run_matrix(
-        input_root=matrix_env["input_root"],
-        work_root=matrix_env["work_root"],
-        backend="cpu",
-        profile=Q8_REFERENCE_PROFILE,
-        repo_dir=None,
-    )
+    code, aggregate = _run(env, profile=BF16_SAFETENSORS_PROFILE, backend="cuda0")
     assert code == 0
     assert aggregate["status"] == "passed"
 
 
-def test_q8_runtime_sha_mismatch_fails_before_generation(monkeypatch, tmp_path):
-    cli = _write_executable(tmp_path)
-    monkeypatch.setenv("MAGE_CPU_PREBUILT_SD_CLI", str(cli))
-    monkeypatch.setattr(qm, "BF16_CPU_RUNTIME_SHA256", "0" * 64)
-    _patch_mem_total(monkeypatch)
-    manifest = _fake_manifest(tmp_path)
-    _patch_manifest_build(monkeypatch, manifest, [])
-    _patch_manifest_verify(monkeypatch, manifest, [])
-    _patch_runtime_manager(monkeypatch)
-    gen_calls: list = []
-    _patch_run_generation(monkeypatch, gen_calls)
-    code, aggregate = qm.run_matrix(
-        input_root=tmp_path / "input",
-        work_root=tmp_path / "work",
-        backend="cpu",
-        profile=Q8_REFERENCE_PROFILE,
-        repo_dir=None,
+def test_runtime_sha_mismatch_fails_before_generation(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, Q8_REFERENCE_PROFILE, "cpu")
+    spec = qm.runtime_spec_for_backend("cpu")
+    monkeypatch.setitem(
+        qm._RUNTIME_SPECS,
+        "cpu",
+        qm.RuntimeSpec(env_var=spec.env_var, sha256="0" * 64),
     )
+    code, aggregate = _run(env, profile=Q8_REFERENCE_PROFILE, backend="cpu")
     assert code != 0
-    assert aggregate["status"] == "failed"
-    assert "mismatch" in aggregate["error"]["message"]
-    assert gen_calls == []
+    assert aggregate["error"]["phase"] == "setup"
+    assert "runtime sha256 mismatch" in aggregate["error"]["message"]
+    assert env["generation_calls"] == []
+
+
+def test_source_identity_records_head_and_tree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    head, tree = qm._source_identity(repo)
+    expected_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    expected_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    assert (head, tree) == (expected_head, expected_tree)
+
+
+def test_evidence_repeats_source_head_tree(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    env = _setup(monkeypatch, tmp_path, Q8_REFERENCE_PROFILE, "cpu")
+    code, aggregate = _run(env, profile=Q8_REFERENCE_PROFILE, backend="cpu", repo_dir=repo)
+    assert code == 0
+    assert aggregate["source_head"] != "unknown"
+    assert aggregate["source_tree"] != "unknown"
+    assert all(r["source_head"] == aggregate["source_head"] for r in aggregate["matrix"])
+    assert all(r["source_tree"] == aggregate["source_tree"] for r in aggregate["matrix"])
+
+
+def test_per_resolution_files_use_new_profile_name(monkeypatch, tmp_path):
+    env = _setup(monkeypatch, tmp_path, BF16_SAFETENSORS_PROFILE, "cpu")
+    code, _ = _run(env, profile=BF16_SAFETENSORS_PROFILE, backend="cpu")
+    assert code == 0
+    output = env["work_root"] / "output"
+    for resolution in (512, 640, 768, 1024):
+        path = output / f"qualification-bf16-safetensors-cpu-{resolution:04d}.json"
+        assert path.is_file()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["profile"] == "bf16-safetensors"
+        assert data["schema_version"] == 2
+        assert data["release_version"] == "1.0.0"
+
+
+def test_q8_reference_contract_remains_cpu_and_cuda0():
+    profile = get_profile(Q8_REFERENCE_PROFILE)
+    assert profile.allowed_backends == ("cpu", "cuda0")
