@@ -5,11 +5,11 @@ from pathlib import Path
 
 EXPECTED_VERSION = "1.0.0"
 EXPECTED_SDCPP = "6b3edaaf32cc19e5bb2d819c788bd557eddc8eba"
-EXPECTED_TARGETS = [
-    "linux_x86_64_cpu",
-    "nvidia_cuda_cuda0",
-    "kaggle_cpu_adapter",
-    "kaggle_cuda0_adapter",
+EXPECTED_MATRIX = [
+    {"profile": "q8-reference", "backend": "cpu"},
+    {"profile": "bf16-safetensors", "backend": "cpu"},
+    {"profile": "q8-reference", "backend": "cuda0"},
+    {"profile": "bf16-safetensors", "backend": "cuda0"},
 ]
 REQUIRED_DOCS = [
     "README.md",
@@ -32,6 +32,8 @@ FORBIDDEN_WORDING = [
     "qualified release targets",
     "release target đã qualification",
     "integration target đã qualification",
+    "bf16-high-memory-cpu",
+    "there is a transformers inference backend",
 ]
 
 
@@ -65,15 +67,21 @@ def audit_release_contract(root: Path) -> list[str]:
     except (OSError, json.JSONDecodeError) as exc:
         errors.append(f"runtime provenance is unreadable: {exc}")
     else:
-        if provenance.get("schema_version") != 2:
-            errors.append("runtime provenance schema_version must be 2")
+        if provenance.get("schema_version") != 3:
+            errors.append("runtime provenance schema_version must be 3")
         if provenance.get("release_version") != EXPECTED_VERSION:
             errors.append("runtime provenance release_version mismatch")
         if provenance.get("commit") != EXPECTED_SDCPP:
             errors.append("runtime commit mismatch")
-        if provenance.get("qualification_targets") != EXPECTED_TARGETS:
-            errors.append("runtime qualification_targets mismatch")
-        if "qualification_state" in provenance or "qualified_backends" in provenance:
+        if provenance.get("qualification_matrix") != EXPECTED_MATRIX:
+            errors.append("runtime qualification_matrix mismatch")
+        mutable_fields = {
+            "qualification_state",
+            "qualified_backends",
+            "qualified_profiles",
+            "qualification_results",
+        }
+        if mutable_fields.intersection(provenance):
             errors.append("runtime provenance contains mutable qualification state")
 
     readme = _text(root, "README.md")
