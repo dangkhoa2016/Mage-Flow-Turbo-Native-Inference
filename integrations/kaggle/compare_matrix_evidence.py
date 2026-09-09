@@ -10,6 +10,7 @@ PINNED_SDCPP_COMMIT = "6b3edaaf32cc19e5bb2d819c788bd557eddc8eba"
 CPU_RUNTIME_SHA256 = "7539d90b99eaf2b6279eec4f9006a68ae53e87bfe0c9c325ff3f329220468a5c"
 CUDA_RUNTIME_SHA256 = "3fae6c1991ad0ac764c36495f688817c8a3d295d7651369bf74b7fd33743c3d0"
 REQUEST_FIELDS = ("prompt", "seed", "steps", "cfg", "threads")
+EXPECTED_RESOLUTIONS = (512, 640, 768, 1024)
 
 Q8_DIFFUSION_SHA256 = "4c3dafc143ee64121692b6b63563a4f5288bf6183c4870e1d65f1566519ba7f0"
 BF16_DIFFUSION_SHA256 = "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d"
@@ -29,6 +30,15 @@ _EXPECTED_CELL = {
 
 def _load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _record_resolution(record: dict) -> int | None:
+    resolution = record.get("resolution") or {}
+    width = resolution.get("width")
+    height = resolution.get("height")
+    if isinstance(width, int) and width == height:
+        return width
+    return None
 
 
 def _canonical_request(data: dict, label: str) -> tuple[dict | None, list[str]]:
@@ -54,11 +64,9 @@ def _canonical_request(data: dict, label: str) -> tuple[dict | None, list[str]]:
 def _records_by_resolution(data: dict) -> dict[int, dict]:
     result: dict[int, dict] = {}
     for record in data.get("matrix") or []:
-        resolution = record.get("resolution") or {}
-        width = resolution.get("width")
-        height = resolution.get("height")
-        if isinstance(width, int) and width == height:
-            result[width] = record
+        resolution = _record_resolution(record)
+        if resolution is not None:
+            result[resolution] = record
     return result
 
 
@@ -90,6 +98,84 @@ def _validate_t4_session(label: str, data: dict) -> list[str]:
         errors.append(f"{label}: runtime devices did not expose cuda0")
     if "cuda1" in devices:
         errors.append(f"{label}: runtime devices must not expose cuda1")
+    return errors
+
+
+def _validate_record_identity(label: str, data: dict, record: dict) -> list[str]:
+    errors: list[str] = []
+    resolution = _record_resolution(record)
+    tag = f"{label}/{resolution if resolution is not None else 'invalid-resolution'}"
+    expected = {
+        "schema_version": data.get("schema_version"),
+        "release_version": data.get("release_version"),
+        "source_head": data.get("source_head"),
+        "source_tree": data.get("source_tree"),
+        "profile": data.get("profile"),
+        "backend": data.get("backend"),
+    }
+    for field, value in expected.items():
+        if record.get(field) != value:
+            errors.append(f"{tag}: record {field} mismatch")
+    for field in ("session", "runtime", "models"):
+        if record.get(field) != data.get(field):
+            errors.append(f"{tag}: record {field} mismatch")
+    if record.get("status") == "passed":
+        elapsed = record.get("elapsed_ms")
+        if not isinstance(elapsed, (int, float)) or elapsed <= 0:
+            errors.append(f"{tag}: passed record requires positive elapsed_ms")
+        artifact = record.get("artifact") or {}
+        if artifact.get("width") != resolution or artifact.get("height") != resolution:
+            errors.append(f"{tag}: passed artifact dimensions mismatch")
+        digest = artifact.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64:
+            errors.append(f"{tag}: passed artifact sha256 missing or invalid")
+    return errors
+
+
+def _validate_matrix_structure(label: str, data: dict) -> list[str]:
+    errors: list[str] = []
+    matrix = data.get("matrix") or []
+    resolutions = [_record_resolution(record) for record in matrix]
+    if any(resolution is None for resolution in resolutions):
+        errors.append(f"{label}: matrix contains invalid non-square resolution")
+        return errors
+    if len(set(resolutions)) != len(resolutions):
+        errors.append(f"{label}: matrix contains duplicate resolution records")
+    if tuple(resolutions) != EXPECTED_RESOLUTIONS[: len(resolutions)]:
+        errors.append(f"{label}: matrix records are not an ordered contiguous prefix")
+
+    for record in matrix:
+        errors.extend(_validate_record_identity(label, data, record))
+
+    status = data.get("status")
+    completed = data.get("completed_resolutions") or []
+    failed_resolution = (data.get("failed_resolution") or {}).get("resolution")
+    if status == "passed":
+        if tuple(resolutions) != EXPECTED_RESOLUTIONS:
+            errors.append(f"{label}: passed matrix must contain all four resolutions")
+        if any(record.get("status") != "passed" for record in matrix):
+            errors.append(f"{label}: passed matrix contains non-passed record")
+        if tuple(completed) != EXPECTED_RESOLUTIONS:
+            errors.append(f"{label}: passed matrix completed_resolutions mismatch")
+        if data.get("failed_resolution") is not None or data.get("error") is not None:
+            errors.append(f"{label}: passed matrix must not record failure state")
+    elif status == "failed":
+        if len(matrix) < 2:
+            errors.append(f"{label}: failed matrix must occur after canonical 512 pass")
+        elif any(record.get("status") != "passed" for record in matrix[:-1]):
+            errors.append(f"{label}: failed matrix has a non-passed record before terminal failure")
+        if not matrix or matrix[-1].get("status") != "failed":
+            errors.append(f"{label}: failed matrix must end with exactly one failed record")
+        expected_completed = resolutions[:-1]
+        if completed != expected_completed:
+            errors.append(f"{label}: failed matrix completed_resolutions mismatch")
+        terminal = resolutions[-1] if resolutions else None
+        if failed_resolution != terminal:
+            errors.append(f"{label}: failed_resolution does not match terminal record")
+        if data.get("error") is None:
+            errors.append(f"{label}: failed matrix requires aggregate error")
+    else:
+        errors.append(f"{label}: unsupported matrix status {status!r}")
     return errors
 
 
@@ -133,10 +219,11 @@ def _validate_cell(label: str, data: dict) -> list[str]:
         errors.append(f"{label}: no matrix records")
     else:
         first = matrix[0]
-        if (first.get("resolution") or {}).get("width") != 512:
+        if _record_resolution(first) != 512:
             errors.append(f"{label}: canonical 512 record must be first")
         if first.get("status") != "passed":
             errors.append(f"{label}: canonical 512 record must pass")
+    errors.extend(_validate_matrix_structure(label, data))
 
     if expected_backend == "cuda0":
         errors.extend(_validate_t4_session(label, data))
@@ -169,7 +256,7 @@ def check_comparability(cells: dict[str, dict]) -> tuple[list[str], dict | None]
     resolution_lists = {tuple(cells[key].get("matrix_resolutions") or []) for key in CELL_KEYS}
     if len(resolution_lists) != 1:
         errors.append("resolution list mismatch across cells")
-    elif next(iter(resolution_lists), ()) != (512, 640, 768, 1024):
+    elif next(iter(resolution_lists), ()) != EXPECTED_RESOLUTIONS:
         errors.append("resolution list must be exactly 512,640,768,1024")
 
     canonical: dict | None = None
@@ -236,7 +323,7 @@ def build_2x2_comparison(
 
     by_resolution = {key: _records_by_resolution(value) for key, value in cells.items()}
     rows: list[dict] = []
-    for resolution in [512, 640, 768, 1024]:
+    for resolution in EXPECTED_RESOLUTIONS:
         q8_cpu = by_resolution["q8_cpu"].get(resolution)
         bf16_cpu = by_resolution["bf16_cpu"].get(resolution)
         q8_cuda = by_resolution["q8_cuda0"].get(resolution)
@@ -298,7 +385,7 @@ def build_2x2_comparison(
         "source_head": cells["q8_cpu"]["source_head"],
         "source_tree": cells["q8_cpu"]["source_tree"],
         "request": canonical_request,
-        "resolutions": [512, 640, 768, 1024],
+        "resolutions": list(EXPECTED_RESOLUTIONS),
         "cells": cells,
         "rows": rows,
     }
