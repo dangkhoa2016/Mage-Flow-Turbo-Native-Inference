@@ -167,8 +167,15 @@ def _setup(monkeypatch, tmp_path: Path, profile: str, backend: str):
 
     monkeypatch.setattr(qm, "run_generation", fake_generation)
     if backend == "cuda0":
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+        monkeypatch.setattr(
+            qm,
+            "_probe_physical_gpus",
+            lambda: [{"index": 0, "name": "Tesla T4"}],
+        )
     else:
+        monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     return {
@@ -271,6 +278,10 @@ def test_cuda_enables_cuda_collection_and_positive_vram(monkeypatch, tmp_path):
     assert all(call[1]["collect_cuda"] is True for call in env["generation_calls"])
     assert all(record["gpu_peak_mib"] > 0 for record in aggregate["matrix"])
     assert aggregate["session"]["cuda_visible_devices"] == "0"
+    assert aggregate["session"]["cuda_device_order"] == "PCI_BUS_ID"
+    assert aggregate["session"]["physical_gpus"] == [
+        {"index": 0, "name": "Tesla T4"}
+    ]
 
 
 def test_cuda_requires_exact_visible_device_mask(monkeypatch, tmp_path):
