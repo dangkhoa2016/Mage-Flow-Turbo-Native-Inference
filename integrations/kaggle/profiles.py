@@ -12,7 +12,7 @@ from mageflow_native.constants import (
 )
 
 Q8_REFERENCE_PROFILE = "q8-reference"
-BF16_HIGH_MEMORY_CPU_PROFILE = "bf16-high-memory-cpu"
+BF16_SAFETENSORS_PROFILE = "bf16-safetensors"
 BF16_MIN_RAM_KB = 27 * 1024 * 1024
 BF16_MIN_HEADROOM_KB = 3 * 1024 * 1024
 BF16_TRANSFORMER_FILENAME = "diffusion_pytorch_model.safetensors"
@@ -77,8 +77,8 @@ _PROFILES = {
         vae=_Q8_VAE,
         allowed_backends=("cpu", "cuda0"),
     ),
-    BF16_HIGH_MEMORY_CPU_PROFILE: ModelProfile(
-        name=BF16_HIGH_MEMORY_CPU_PROFILE,
+    BF16_SAFETENSORS_PROFILE: ModelProfile(
+        name=BF16_SAFETENSORS_PROFILE,
         diffusion=ComponentProfile(
             filename=BF16_TRANSFORMER_FILENAME,
             sha256=BF16_TRANSFORMER_SHA256,
@@ -88,7 +88,7 @@ _PROFILES = {
         ),
         text_encoder=_QWEN,
         vae=_BF16_VAE,
-        allowed_backends=("cpu",),
+        allowed_backends=("cpu", "cuda0"),
         min_ram_kb=BF16_MIN_RAM_KB,
     ),
 }
@@ -109,18 +109,18 @@ def validate_profile_environment(
 ) -> ModelProfile:
     profile = get_profile(name)
     if backend not in profile.allowed_backends:
-        if profile.name == BF16_HIGH_MEMORY_CPU_PROFILE:
-            raise ProfilePreflightError(
-                "bf16-high-memory-cpu is CPU-only; no backend or Q8 fallback is permitted"
-            )
         raise ProfilePreflightError(
             f"profile {profile.name} does not allow backend {backend}"
         )
-    if mem_total_kb < profile.min_ram_kb:
+    if (
+        profile.name == BF16_SAFETENSORS_PROFILE
+        and backend == "cpu"
+        and mem_total_kb < profile.min_ram_kb
+    ):
         required_gib = profile.min_ram_kb // (1024 * 1024)
         raise ProfilePreflightError(
-            f"profile {profile.name} requires at least {required_gib} GiB visible RAM; "
-            f"detected {mem_total_kb / (1024 * 1024):.2f} GiB"
+            f"profile {profile.name} requires at least {required_gib} GiB visible RAM "
+            f"for CPU qualification; detected {mem_total_kb / (1024 * 1024):.2f} GiB"
         )
     return profile
 
@@ -128,17 +128,18 @@ def validate_profile_environment(
 def validate_profile_result(
     name: str,
     *,
+    backend: str,
     minimum_mem_available_kb: int | None,
 ) -> None:
     profile = get_profile(name)
-    if profile.name != BF16_HIGH_MEMORY_CPU_PROFILE:
+    if profile.name != BF16_SAFETENSORS_PROFILE or backend != "cpu":
         return
     if minimum_mem_available_kb is None:
         raise ProfilePreflightError(
-            "bf16-high-memory-cpu requires measurable RAM headroom telemetry"
+            "bf16-safetensors CPU qualification requires measurable RAM headroom telemetry"
         )
     if minimum_mem_available_kb < BF16_MIN_HEADROOM_KB:
         raise ProfilePreflightError(
-            "bf16-high-memory-cpu failed RAM headroom gate: "
+            "bf16-safetensors CPU qualification failed RAM headroom gate: "
             f"minimum available {minimum_mem_available_kb / (1024 * 1024):.2f} GiB < 3 GiB"
         )
