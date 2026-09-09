@@ -67,6 +67,7 @@ def _aggregate(profile, backend, *, elapsed, source_head=HEAD, source_tree=TREE)
         rec["source_head"] = source_head
         rec["source_tree"] = source_tree
         records.append(rec)
+    is_cuda = backend == "cuda0"
     return {
         "schema_version": 2,
         "release_version": "1.0.0",
@@ -78,7 +79,9 @@ def _aggregate(profile, backend, *, elapsed, source_head=HEAD, source_tree=TREE)
         "session": {
             "hostname": "fake",
             "backend": backend,
-            "cuda_visible_devices": "0" if backend == "cuda0" else None,
+            "cuda_device_order": "PCI_BUS_ID" if is_cuda else None,
+            "cuda_visible_devices": "0" if is_cuda else None,
+            "physical_gpus": ([{"index": 0, "name": "Tesla T4"}] if is_cuda else []),
         },
         "matrix_resolutions": [512, 640, 768, 1024],
         "completed_resolutions": [512, 640, 768, 1024],
@@ -89,6 +92,7 @@ def _aggregate(profile, backend, *, elapsed, source_head=HEAD, source_tree=TREE)
             "sha256": (
                 cmp.CPU_RUNTIME_SHA256 if backend == "cpu" else cmp.CUDA_RUNTIME_SHA256
             ),
+            "devices": "cuda0 NVIDIA Tesla T4" if is_cuda else "CPU Intel Xeon",
         },
         "models": _model(profile),
         "matrix": records,
@@ -102,10 +106,7 @@ def _write(tmp_path: Path, name: str, data: dict) -> Path:
 
 
 def _paths(tmp_path, cells):
-    return {
-        key: _write(tmp_path, f"{key}.json", value)
-        for key, value in cells.items()
-    }
+    return {key: _write(tmp_path, f"{key}.json", value) for key, value in cells.items()}
 
 
 def _valid_cells():
@@ -191,6 +192,30 @@ def test_cuda_mask_must_be_zero(tmp_path):
     result = _build(tmp_path, cells)
     assert result["comparability"] == "failed"
     assert any("CUDA_VISIBLE_DEVICES" in error for error in result["errors"])
+
+
+def test_cuda_device_order_must_be_pci_bus_id(tmp_path):
+    cells = _valid_cells()
+    cells["bf16_cuda0"]["session"]["cuda_device_order"] = None
+    result = _build(tmp_path, cells)
+    assert result["comparability"] == "failed"
+    assert any("CUDA_DEVICE_ORDER" in error for error in result["errors"])
+
+
+def test_cuda_physical_gpu_must_be_t4_or_t4x2(tmp_path):
+    cells = _valid_cells()
+    cells["q8_cuda0"]["session"]["physical_gpus"] = [{"index": 0, "name": "NVIDIA L4"}]
+    result = _build(tmp_path, cells)
+    assert result["comparability"] == "failed"
+    assert any("T4/T4x2" in error for error in result["errors"])
+
+
+def test_cuda_runtime_devices_must_hide_cuda1(tmp_path):
+    cells = _valid_cells()
+    cells["q8_cuda0"]["runtime"]["devices"] = "cuda0 Tesla T4\ncuda1 Tesla T4"
+    result = _build(tmp_path, cells)
+    assert result["comparability"] == "failed"
+    assert any("cuda1" in error for error in result["errors"])
 
 
 def test_cuda_success_requires_positive_gpu_peak(tmp_path):
