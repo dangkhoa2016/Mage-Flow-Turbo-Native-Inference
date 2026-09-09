@@ -150,7 +150,7 @@ Do not attach both Mage diffusion families in an ordinary authority session. Mix
 
 Before the strict 2×2 release redesign, a same-host paired 768×768 CPU visual study compared the Q8 and BF16 representations. That historical study remains useful as quality-oriented research, but it is not the final v1.0.0 2×2 performance authority and does not determine the default profile. Q8 remains the canonical/default profile.
 
-See [BF16 SafeTensors background and qualification policy](docs/BF16-HIGH-MEMORY-CPU.md).
+See [BF16 SafeTensors background and qualification policy](docs/BF16-SAFETENSORS.md).
 
 ## Reproducibility and evidence
 
@@ -177,7 +177,7 @@ Evidence archives are checksum-protected, contain internal manifests, and reject
 - [CUDA](docs/cuda.md)
 - [Kaggle](docs/kaggle.md)
 - [Strict v1.0.0 benchmark contract](docs/BENCHMARKS-v1.0.0.md)
-- [BF16 SafeTensors profile](docs/BF16-HIGH-MEMORY-CPU.md)
+- [BF16 SafeTensors profile](docs/BF16-SAFETENSORS.md)
 - [REST API](docs/REST-API.md)
 - [Testing](docs/TESTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
