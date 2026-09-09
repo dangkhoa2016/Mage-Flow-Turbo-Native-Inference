@@ -13,6 +13,8 @@ from mageflow_native.constants import (
 
 Q8_REFERENCE_PROFILE = "q8-reference"
 BF16_SAFETENSORS_PROFILE = "bf16-safetensors"
+# Backward-compatible symbol only; the canonical profile value is bf16-safetensors.
+BF16_HIGH_MEMORY_CPU_PROFILE = BF16_SAFETENSORS_PROFILE
 BF16_MIN_RAM_KB = 27 * 1024 * 1024
 BF16_MIN_HEADROOM_KB = 3 * 1024 * 1024
 BF16_TRANSFORMER_FILENAME = "diffusion_pytorch_model.safetensors"
