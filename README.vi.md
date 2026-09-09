@@ -113,6 +113,17 @@ Với người dùng bình thường: **một profile được chọn cho mỗi 
 
 BF16 là profile experimental, opt-in, hướng RAM cao / chất lượng; Q8 vẫn là profile mặc định/canonical.
 
+### Evidence CPU BF16
+
+Một benchmark visual paired 768×768 cùng máy đã hoàn tất trên 4 CPU threads:
+
+| Profile CPU đã test | Mean / hình | Peak `sd-cli` RSS | Vai trò hiện tại |
+|---|---:|---:|---|
+| `q8-reference` | ~10,67 phút | ~8,89 GB | canonical/default |
+| `bf16-high-memory-cpu` | ~16,90 phút | ~12,54 GB | supported opt-in experimental |
+
+Trong so sánh blind 768×768 10 cặp đã hoàn tất, BF16 thắng 4 prompt, Q8 thắng 3 và 3 hoà; chỉ một win của BF16 là rõ ràng về mặt vật chất. Vì vậy BF16 vẫn khả dụng cho thử nghiệm hướng chất lượng, nhưng evidence hiện tại không đủ để thay Q8 làm mặc định. Xem [docs/BF16-HIGH-MEMORY-CPU.vi.md](docs/BF16-HIGH-MEMORY-CPU.vi.md).
+
 ## Tái lập và evidence
 
 Canonical request:

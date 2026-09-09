@@ -2,7 +2,7 @@
 
 > 🌐 Language / Ngôn ngữ: [English](BF16-HIGH-MEMORY-CPU.md) | **Tiếng Việt**
 
-Tài liệu này định nghĩa track qualification CPU BF16 dạng opt-in cho Mage-Flow-Turbo-Native-Inference. Track này không thay thế profile `q8-reference` đã đóng băng và không thay đổi contract benchmark CPU ↔ T4 của v1.0.0. Profile BF16 là hạ tầng qualification thử nghiệm và **chưa release-qualified** cho tới khi có evidence từ một CPU run thật.
+Tài liệu này định nghĩa track qualification CPU BF16 dạng opt-in cho Mage-Flow-Turbo-Native-Inference. Track này không thay thế profile `q8-reference` đã đóng băng và không thay đổi contract benchmark CPU ↔ T4 của v1.0.0. BF16 là profile CPU high-memory dạng opt-in, experimental nhưng được support. Đã có real CPU evidence và benchmark paired 768×768, nhưng BF16 không thay thế profile canonical `q8-reference` và không được nâng lên default/release reference từ evidence này.
 
 ## Contract profile
 
@@ -68,7 +68,7 @@ Fail-fast RAM policy được giữ nguyên: RAM hiển thị tối thiểu 27 G
 
 Gate 512×512 chỉ được chấp nhận khi model/runtime verification PASS, `sd-cli` thoát thành công, PNG hợp lệ, backend được chọn là CPU và minimum available memory quan sát được vẫn từ 3 GiB trở lên.
 
-Chỉ sau khi gate này PASS mới chạy fresh CPU session với cùng matrix 512 → 640 → 768 → 1024 để so sánh trực tiếp Q8 và BF16. Cho tới khi có real BF16 evidence, profile này chỉ là hạ tầng qualification thử nghiệm và không được mô tả là đã release-qualified.
+Chỉ sau khi gate này PASS mới chạy fresh CPU session với cùng matrix 512 → 640 → 768 → 1024 để so sánh trực tiếp Q8 và BF16. Đã có real BF16 CPU evidence. Tuy vậy profile vẫn là opt-in và experimental: benchmark paired 768×768 đã hoàn tất không chứng minh lợi thế hình ảnh vượt trội nhất quán đủ để thay Q8 làm profile canonical/default.
 
 ## So sánh cùng máy Q8 và BF16 trên CPU
 
@@ -106,3 +106,28 @@ python -m integrations.kaggle.compare_matrix_evidence \
 Utility so sánh xác minh tính có thể so sánh (cùng source HEAD, backend CPU, SHA và commit runtime, dải resolution, prompt, seed, steps, CFG, threads, SHA text encoder và SHA VAE, cùng identity diffusion Q8 và BF16) trước khi tính tỷ lệ elapsed và RSS. Nếu bất kỳ gate nào fail nó báo `COMPARABILITY=FAIL` và không xuất bản tỷ lệ hiệu năng gây hiểu lầm.
 
 Kết quả này chỉ báo cáo **evidence so sánh CPU qualification cùng máy**. Profile BF16 thử nghiệm và profile Q8 reference chỉ được so sánh về latency và bộ nhớ; kết quả không phải release qualification, không khẳng định chất lượng hình ảnh vượt trội, và không được mô tả như bằng chứng yêu cầu tối thiểu 27 GiB cho matrix 1024 đầy đủ.
+
+## Qualification paired 768×768 đã hoàn tất
+
+Một qualification visual paired cùng máy đã hoàn tất và được đóng băng:
+
+- 10 prompt × 2 profile = 20 canonical run;
+- cùng một CPU host;
+- cùng prompt/seed cho mỗi cặp;
+- CPU, 768×768, 4 steps, CFG 1.0, 4 threads;
+- runtime/model identity chính xác được đóng băng;
+- 20/20 thành công, 10/10 cặp hoàn tất, 0 failure;
+- benchmark `visual-q8-vs-bf16-768-10p`, benchmark source head `e84db748f8d140d4a781c85739a18da5a50c8d35`;
+- SHA-256 archive evidence cuối `9036186260441fd353b8d32f7b584fdb8bdc4b345d18e8b4a9008983eb33e04d`;
+- Q8 mean elapsed ≈ 640,0 s/hình ≈ 10,67 phút/hình; BF16 mean elapsed ≈ 1013,9 s/hình ≈ 16,90 phút/hình;
+- Q8 peak `sd-cli` RSS ≈ 8,89 GB; BF16 peak `sd-cli` RSS ≈ 12,54 GB;
+- blind visual review: BF16 4 win, Q8 3 win, 3 tie (1 win vật chất rõ ràng của BF16);
+- quyết định: Q8 vẫn canonical/default; BF16 vẫn là profile opt-in experimental high-memory được support.
+
+Đây là kết quả trên Kaggle CPU host đã test với `threads=4`, không phải con số hiệu năng phổ quát.
+
+Đây không phải qualification scaling 512→1024.
+Không khẳng định scaling 8/16/32/64 vCPU.
+Không khẳng định resolution cao hơn làm BF16 thắng Q8.
+
+Người dùng có nhiều CPU/RAM hơn có thể thử BF16 ở resolution cao hơn, nhưng phải tự benchmark host của mình.

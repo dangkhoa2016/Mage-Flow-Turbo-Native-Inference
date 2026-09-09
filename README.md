@@ -119,6 +119,17 @@ For normal use: **one selected profile per Kaggle session**.
 
 The BF16 profile remains a supported, opt-in, high-memory / quality-oriented experimental profile; Q8 remains the default/canonical profile.
 
+### BF16 CPU evidence
+
+A completed same-host paired 768×768 visual benchmark on 4 CPU threads gives:
+
+| Tested CPU profile | Mean / image | Peak `sd-cli` RSS | Current role |
+|---|---:|---:|---|
+| `q8-reference` | ~10.67 min | ~8.89 GB | canonical/default |
+| `bf16-high-memory-cpu` | ~16.90 min | ~12.54 GB | supported opt-in experimental |
+
+In the completed 10-pair blind 768×768 comparison, BF16 won 4 prompts, Q8 won 3 and 3 tied; only one BF16 win was materially clear. Therefore BF16 remains available for quality-oriented experimentation, but current evidence does not justify replacing Q8 as the default. See [docs/BF16-HIGH-MEMORY-CPU.md](docs/BF16-HIGH-MEMORY-CPU.md).
+
 ## Reproducibility and evidence
 
 The canonical request is:
