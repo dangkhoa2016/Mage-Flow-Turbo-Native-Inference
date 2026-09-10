@@ -17,10 +17,15 @@ def kaggle_cache_root() -> Path:
 
 def runtime_hint(backend: str) -> str | None:
     hint = os.environ.get("MAGE_SD_CLI")
-    if hint:
+    if hint and Path(hint).is_file():
         return hint
-    if backend == "cpu":
-        probe = os.environ.get("MAGE_CPU_PREBUILT_SD_CLI")
-        if probe and Path(probe).is_file():
-            return probe
+    env_name = {
+        "cpu": "MAGE_CPU_PREBUILT_SD_CLI",
+        "cuda0": "MAGE_CUDA_PREBUILT_SD_CLI",
+    }.get(backend)
+    if env_name is None:
+        return None
+    probe = os.environ.get(env_name)
+    if probe and Path(probe).is_file():
+        return probe
     return None

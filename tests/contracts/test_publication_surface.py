@@ -1,8 +1,42 @@
+import builtins
+import json
 import subprocess
+import symtable
 import sys
 from pathlib import Path
 
 REPO = Path(".")
+
+
+def test_public_notebook_has_no_unresolved_module_globals():
+    notebook_path = REPO / "notebooks" / "kaggle-production-demo.ipynb"
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+
+    code = "\n\n".join(
+        "".join(cell.get("source", []))
+        if isinstance(cell.get("source", ""), list)
+        else str(cell.get("source", ""))
+        for cell in notebook.get("cells", [])
+        if cell.get("cell_type") == "code"
+    )
+
+    table = symtable.symtable(code, str(notebook_path), "exec")
+    builtins_set = set(dir(builtins))
+
+    unresolved = sorted(
+        symbol.get_name()
+        for symbol in table.get_symbols()
+        if symbol.is_referenced()
+        and not (
+            symbol.is_assigned()
+            or symbol.is_imported()
+            or symbol.is_parameter()
+            or symbol.is_namespace()
+        )
+        and symbol.get_name() not in builtins_set
+    )
+
+    assert unresolved == [], f"unresolved notebook module globals: {unresolved}"
 
 
 def test_publication_audit_passes_on_clean_tree():

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mageflow_native.models.manifest import sha256_file
 from integrations.kaggle.profiles import (
-    BF16_HIGH_MEMORY_CPU_PROFILE,
+    BF16_SAFETENSORS_PROFILE,
     Q8_REFERENCE_PROFILE,
     ComponentProfile,
     get_profile,
@@ -22,7 +22,7 @@ class InputAttachmentPolicyError(InputResolutionError):
 
 _MAGE_DIFFUSION_FAMILY_LABELS = {
     Q8_REFERENCE_PROFILE: "GGUF q8-0",
-    BF16_HIGH_MEMORY_CPU_PROFILE: "PyTorch/Transformers SafeTensors default",
+    BF16_SAFETENSORS_PROFILE: "PyTorch/Transformers SafeTensors default",
 }
 
 
@@ -114,7 +114,7 @@ def _manifest_component(path: Path, input_root: Path, component: ComponentProfil
 def detect_attached_diffusion_families(input_root: Path) -> tuple[str, ...]:
     input_root = Path(input_root)
     detected: list[str] = []
-    for profile_name in (Q8_REFERENCE_PROFILE, BF16_HIGH_MEMORY_CPU_PROFILE):
+    for profile_name in (Q8_REFERENCE_PROFILE, BF16_SAFETENSORS_PROFILE):
         profile = get_profile(profile_name)
         fragment = (profile.diffusion.required_fragment or "").strip("/").lower()
         for candidate in input_root.rglob(profile.diffusion.filename):
